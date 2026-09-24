@@ -978,7 +978,11 @@ test('plain file 403 is removed from manifest/cache/export and never retried aft
     assert.equal(exported.errors[0].item.path, root + '/first.pdf');
     assert.match(h.panel.getElementById('log').textContent, /403/);
     const cached = core.validateManifest(await core.cacheRequest(db, root));
-    assert.deepEqual(cached.files, exported.files);
+    // The 403 checkpoint can precede another worker learning its file size.
+    // This regression requires durable link removal, not identical timing of
+    // response-derived metadata in the earlier checkpoint and later export.
+    assert.deepEqual(cached.files.map(({ path, url }) => ({ path, url })),
+      [{ path: root + '/Теория/Ноты +.pdf', url: fileURL(root + '/Теория/Ноты +.pdf') }]);
     await clock.advance(600000); assert.equal(clock.urls.length, 0);
     await h.click('retry');
     assert.equal(h.calls.filter(u => u === fileURL(root + '/first.pdf')).length, 1);

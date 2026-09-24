@@ -4,6 +4,8 @@
 
 - Prepare the public repository with a concise installation guide, MIT license,
   GitHub userscript metadata and automated offline tests.
+- Make the denied-link cache regression independent of another worker learning
+  its response size after the exclusion checkpoint has already been saved.
 
 ## 3.1.9
 
