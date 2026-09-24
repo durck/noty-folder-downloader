@@ -1,0 +1,22 @@
+{
+  "name": "noty-folder-downloader",
+  "version": "3.1.9",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/durck/noty-folder-downloader.git"
+  },
+  "description": "Folder-preserving userscript for the public music archive",
+  "scripts": {
+    "test": "node --test test.cjs",
+    "check": "node --check noty-folder-downloader.user.js",
+    "test:browser": "node browser-smoke.cjs",
+    "test:ui": "node ui-smoke.cjs"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "^6.2.5",
+    "jsdom": "^29.1.1",
+    "playwright": "^1.63.0"
+  }
+}
