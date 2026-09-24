@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### 3.2.0
+
+- Replace byte-only hill climbing with bounded, workload-aware probes and a
+  return-to-baseline confirmation; use successful small-file completions,
+  preserve mixed-workload completion throughput, and rebaseline stale references.
+- Keep measurements usable with underfilled workers and background tabs; report
+  timer gaps, recovery, draining and queue-tail suspension explicitly.
+- Preserve manual preferences across mode switches and recovery. Enter auto
+  from the manual limit, capped by the auto maximum, and retain learned state
+  when unrelated scan/retry settings change.
+- Wake the scheduler at the next permitted launch deadline, avoiding an extra
+  200 ms idle delay for short jobs while preserving request pacing.
+- Add deterministic algorithm and actual-pool simulations plus integration and
+  browser checks for live mode switches, pause, background tabs and recovery.
+
+## 3.1.9
+
 - Move test runners to `tests/` and screenshots to ignored `artifacts/`; remove
   the internal development plan and old local generated results.
 - Keep helper query-stripping fixtures inside the mocked browser route instead
@@ -10,8 +27,6 @@
   GitHub userscript metadata and automated offline tests.
 - Make the denied-link cache regression independent of another worker learning
   its response size after the exclusion checkpoint has already been saved.
-
-## 3.1.9
 
 - Version 3.1.9: overlay aggregate saved files per second on the speed chart
   using an orange dashed line and an independent labeled zero-based scale.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Noty: скачать папку целиком
 // @namespace    local.noty-folder-downloader
-// @version      3.1.9
+// @version      3.2.0
 // @license      MIT
 // @homepageURL  https://github.com/durck/noty-folder-downloader
 // @supportURL   https://github.com/durck/noty-folder-downloader/issues
@@ -226,61 +226,158 @@
     constructor(settings, now = 0, initial = 1) {
       this.settings = normalizeSettings(settings);
       this.limit = Math.min(this.settings.maxThreads, Math.max(1, initial));
-      this.best = { threads: this.limit, rate: 0 };
-      this.phase = 'baseline'; this.reference = null; this.lowRounds = 0; this.held = 0;
+      this.explorations = 0;
       this.resetWindow(now);
     }
-    resetWindow(now) {
-      this.since = now; this.bytes = 0; this.samples = [];
-      this.warmUntil = now + this.settings.windowSeconds * 1000;
+    clearWindow(now) {
+      this.frames = []; this.windows = [];
+      this.warmUntil = now + Math.min(2000, this.settings.windowSeconds * 500);
     }
-    change(limit, phase, now) {
-      this.limit = Math.max(1, Math.min(this.settings.maxThreads, limit));
-      this.phase = phase; this.held = 0; this.lowRounds = 0; this.resetWindow(now);
+    resetWindow(now) {
+      // A pause, error or new run invalidates comparisons, not the chosen limit.
+      this.phase = 'baseline'; this.probe = null; this.reference = null;
+      this.best = { threads: this.limit, rate: 0, fileRate: 0, metric: 'bytes' };
+      this.reason = 'measuring'; this.holdUntil = now;
+      this.clearWindow(now);
+    }
+    updateSettings(input, now) {
+      const before = this.settings, next = normalizeSettings(input);
+      this.settings = next;
+      if (before.auto !== next.auto) {
+        // Manual preference belongs to the user. Never replace it with a probe.
+        this.limit = Math.min(next.maxThreads, next.auto ? next.threads : this.best.threads || this.limit);
+        this.resetWindow(now); this.reason = next.auto ? 'measuring' : 'manual';
+      } else if (['maxThreads', 'windowSeconds', 'gainPercent', 'delayMs'].some(key => before[key] !== next[key])) {
+        this.limit = Math.min(this.limit, next.maxThreads); this.resetWindow(now);
+      }
     }
     penalize(now) {
-      this.change(Math.max(1, Math.floor(this.limit / 2)), 'baseline', now);
-      this.best = { threads: this.limit, rate: 0 };
+      this.limit = Math.max(1, Math.floor(this.limit / 2));
+      this.resetWindow(now); this.reason = 'recovery';
     }
-    observe(bytes, elapsedMs, eligible, now) {
-      if (!eligible || elapsedMs <= 0 || elapsedMs > 5000) { this.resetWindow(now); return null; }
-      if (now < this.warmUntil) { this.since = now; return null; }
-      this.bytes += bytes;
-      const duration = now - this.since;
-      if (duration < this.settings.windowSeconds * 1000) return null;
-      this.samples.push(this.bytes * 1000 / duration); this.since = now; this.bytes = 0;
-      if (this.samples.length < 3) return null;
-      const rate = [...this.samples].sort((a, b) => a - b)[1]; this.samples = [];
-      if (rate <= 0) return null;
-      const old = this.limit;
-      const gain = this.settings.gainPercent / 100;
-      if (this.phase === 'baseline' || this.phase === 'up') {
-        if (this.phase === 'baseline' || rate > this.best.rate * (1 + gain)) {
-          this.best = { threads: this.limit, rate };
-          if (this.limit < this.settings.maxThreads) this.change(this.limit + 1, 'up', now);
-          else this.change(this.limit, 'hold', now);
-        } else this.change(this.best.threads, 'hold', now);
-      } else if (this.phase === 'down') {
-        if (rate >= this.reference.rate * (1 - gain)) {
-          this.best = { threads: this.limit, rate }; this.change(this.limit, 'hold', now);
-        } else {
-          this.best = this.reference; this.change(this.reference.threads, 'hold', now);
+    suspend(reason, now) {
+      if (this.reason !== reason) {
+        if (reason === 'draining') {
+          // A lower probe and A/B/A confirmation must survive their own drain.
+          this.clearWindow(now); this.reason = reason; return;
         }
+        // Do not keep an unconfirmed increase across a contaminated interval.
+        if (this.probe) this.limit = this.probe.base.threads;
+        this.resetWindow(now); this.reason = reason;
+      }
+    }
+    move(limit, phase, now) {
+      this.limit = Math.max(1, Math.min(this.settings.maxThreads, limit));
+      this.phase = phase; this.reason = 'measuring'; this.clearWindow(now);
+    }
+    hold(sample, now, reason = 'stable') {
+      this.best = sample; this.probe = null; this.reference = sample;
+      this.holdUntil = now + Math.max(30000, this.settings.windowSeconds * 4000);
+      this.move(sample.threads, 'hold', now); this.reason = reason;
+    }
+    startProbe(sample, next, now) {
+      this.best = sample; this.probe = { base: sample, candidate: null, next };
+      this.move(next, 'probe', now);
+    }
+    comparable(a, b) {
+      if (a.metric !== b.metric) return false;
+      // Avoid attributing a new population of files to the worker change.
+      if (a.meanSize > 0 && b.meanSize > 0) {
+        const ratio = a.meanSize / b.meanSize;
+        if (ratio < 0.5 || ratio > 2) return false;
+      }
+      return true;
+    }
+    score(sample) { return sample.metric === 'files' ? sample.fileRate : sample.rate; }
+    acceptable(candidate, base) {
+      if (!this.comparable(candidate, base) || this.score(base) <= 0) return false;
+      const gain = Math.max(this.settings.gainPercent / 100, candidate.noise, base.noise);
+      const ratio = this.score(candidate) / this.score(base);
+      // Mixed queues must not buy network throughput by starving completions.
+      if (candidate.metric === 'bytes' && candidate.files >= 5 && base.files >= 5 && candidate.fileRate < base.fileRate * 0.75) return false;
+      return candidate.threads < base.threads ? ratio >= 1 - Math.min(gain, 0.08) : ratio > 1 + gain;
+    }
+    summarize(frames) {
+      const total = frames.reduce((a, f) => {
+        for (const key of ['ms', 'bytes', 'files', 'completedBytes', 'smallFiles', 'activeMs']) a[key] += f[key];
+        a.largeActive ||= f.largeActive; return a;
+      }, { ms: 0, bytes: 0, files: 0, completedBytes: 0, smallFiles: 0, activeMs: 0, largeActive: false });
+      return { ...total, threads: this.limit, rate: total.bytes * 1000 / total.ms,
+        fileRate: total.files * 1000 / total.ms, meanSize: total.files ? total.completedBytes / total.files : 0,
+        metric: total.files >= 5 && total.smallFiles === total.files && !total.largeActive ? 'files' : 'bytes',
+        utilization: total.activeMs / total.ms / this.limit };
+    }
+    observe(bytes, elapsedMs, eligible, now, work = {}) {
+      if (!this.settings.auto) { this.suspend('manual', now); return null; }
+      if (!eligible) { this.suspend(work.reason || 'waiting', now); return null; }
+      if (!Number.isFinite(elapsedMs) || elapsedMs <= 0 || elapsedMs > 30000) {
+        this.suspend('timer-gap', now); return null;
+      }
+      if (this.reason === 'draining') {
+        this.clearWindow(now); this.reason = 'measuring'; return null;
+      }
+      if (['manual', 'waiting', 'pause', 'retry', 'recovery', 'tail', 'timer-gap'].includes(this.reason)) {
+        this.resetWindow(now); return null;
+      }
+      // Do not mix bytes that straddle a setting/worker change with its new window.
+      if (now - elapsedMs < this.warmUntil) return null;
+      const positive = value => Number.isFinite(value) ? Math.max(0, value) : 0;
+      this.frames.push({ ms: elapsedMs, bytes: positive(bytes), files: positive(work.files),
+        completedBytes: positive(work.completedBytes), smallFiles: positive(work.smallFiles),
+        activeMs: Math.min(this.limit, positive(work.active ?? this.limit)) * elapsedMs,
+        largeActive: !!work.largeActive });
+      const window = this.summarize(this.frames);
+      if (window.ms < this.settings.windowSeconds * 1000) return null;
+      this.windows.push(window); this.frames = [];
+      if (this.windows.length < 2) return null;
+      const sample = this.summarize(this.windows);
+      const value = w => sample.metric === 'files' ? w.fileRate : w.rate;
+      const scores = this.windows.map(value);
+      const spread = (Math.max(...scores) - Math.min(...scores)) / Math.max(1, ...scores);
+      // A third window handles bursty reads; a probe never waits forever for quiet.
+      if (spread > 0.25 && this.windows.length < 3) return null;
+      if (this.windows.length === 3) {
+        const median = [...this.windows].sort((a, b) => value(a) - value(b))[1];
+        sample.rate = median.rate; sample.fileRate = median.fileRate;
+      }
+      sample.noise = Math.min(0.3, spread / 2); this.windows = [];
+      const old = this.limit;
+      if (this.phase === 'baseline') {
+        this.best = sample;
+        if (this.score(sample) > 0 && this.limit < this.settings.maxThreads) this.startProbe(sample, this.limit + 1, now);
+        else this.hold(sample, now, this.score(sample) > 0 ? 'ceiling' : 'no-progress');
+      } else if (this.phase === 'probe') {
+        const base = this.probe.base;
+        if (!this.comparable(sample, base)) {
+          this.move(base.threads, 'baseline', now); this.probe = null; this.reason = 'workload';
+        } else if (this.acceptable(sample, base)) {
+          this.probe.candidate = sample;
+          // A/B/A: confirm against a fresh baseline, not an obsolete peak.
+          this.move(base.threads, 'confirm', now);
+        } else this.hold(base, now, sample.utilization < 0.65 ? 'pacing' : 'plateau');
+      } else if (this.phase === 'confirm') {
+        const candidate = this.probe.candidate;
+        if (this.acceptable(candidate, sample)) {
+          this.best = candidate; this.probe = null;
+          this.move(candidate.threads, 'baseline', now);
+        } else this.hold(sample, now, 'unconfirmed');
       } else {
-        this.held += this.settings.windowSeconds * 3;
-        this.lowRounds = rate < this.best.rate * 0.8 ? this.lowRounds + 1 : 0;
-        if (this.lowRounds >= 2 && this.limit > 1) {
-          this.reference = { threads: this.limit, rate };
-          this.change(this.limit - 1, 'down', now);
-        } else {
-          // Refresh the reference to avoid comparing against an obsolete peak forever.
-          if (!this.lowRounds) this.best = { threads: this.limit, rate: this.best.rate * 0.7 + rate * 0.3 };
-          if (this.held >= 120 && this.limit < this.settings.maxThreads && !this.lowRounds) {
-            this.best = { threads: this.limit, rate }; this.change(this.limit + 1, 'up', now);
-          }
+        const changed = !this.comparable(sample, this.best);
+        const degraded = this.score(sample) < this.score(this.best) * 0.8;
+        // Always refresh, including at one worker and when progress is zero.
+        this.best = sample;
+        if (changed) { this.move(this.limit, 'baseline', now); this.reason = 'workload'; }
+        else if (degraded && this.limit > 1 && this.score(sample) > 0) this.startProbe(sample, this.limit - 1, now);
+        else if (now >= this.holdUntil && this.score(sample) > 0) {
+          // Occasionally look beyond a local one-step plateau, within the same cap.
+          const step = ++this.explorations % 2 === 0 ? 2 : 1;
+          const next = this.limit < this.settings.maxThreads ? Math.min(this.settings.maxThreads, this.limit + step) : Math.max(1, this.limit - 1);
+          if (next !== this.limit) this.startProbe(sample, next, now);
+          else this.hold(sample, now, 'ceiling');
         }
       }
-      return { from: old, to: this.limit, rate, phase: this.phase };
+      return { from: old, to: this.limit, rate: sample.rate, fileRate: sample.fileRate,
+        metric: sample.metric, phase: this.phase, reason: this.reason };
     }
   }
   async function runPool({ queue, limit, paused, worker, complete, failed, tick = () => {},
@@ -298,7 +395,9 @@
         }
         tick(active.size, queue.length);
         if (!active.size && (paused() || !queue.length)) break;
-        await Promise.race([...active, wait(200)]);
+        const canStart = !paused() && queue.length && active.size < Math.max(1, Math.min(12, limit()));
+        const untilStart = canStart ? Math.max(1, nextStart - now()) : 200;
+        await Promise.race([...active, wait(Math.min(200, untilStart))]);
       }
     } finally { await Promise.allSettled(active); }
   }
@@ -709,7 +808,7 @@
     const original = [...document.body.childNodes].filter(node => node !== panelHost &&
       !(node.nodeType === 1 && ['SCRIPT', 'STYLE', 'LINK'].includes(node.tagName)));
     const shell = document.createElement('div'); shell.id = 'noty-workspace';
-    shell.innerHTML = `<header class="noty-app-head"><div class="noty-brand"><span class="noty-brand-mark" aria-hidden="true">♫</span><div><span class="noty-kicker">МУЗЫКАЛЬНАЯ БИБЛИОТЕКА</span><h1>Нотный архив</h1></div></div><span class="noty-app-caption">Каталог и загрузки <span>3.1</span></span></header>
+    shell.innerHTML = `<header class="noty-app-head"><div class="noty-brand"><span class="noty-brand-mark" aria-hidden="true">♫</span><div><span class="noty-kicker">МУЗЫКАЛЬНАЯ БИБЛИОТЕКА</span><h1>Нотный архив</h1></div></div><span class="noty-app-caption">Каталог и загрузки <span>3.2</span></span></header>
       <main class="noty-columns"><section class="noty-catalog" aria-labelledby="noty-catalog-title"><div class="noty-catalog-head"><div class="noty-catalog-heading"><div><span class="noty-kicker">ОБЗОР АРХИВА</span><h2 id="noty-catalog-title">Каталог файлов</h2></div><span id="noty-catalog-count" role="status"></span></div>
       <div class="noty-catalog-tools"><label class="noty-search"><span aria-hidden="true">⌕</span><input id="noty-catalog-search" type="search" placeholder="Найти в этой папке" aria-label="Найти в открытой папке"></label><select id="noty-catalog-kind" aria-label="Тип записей каталога"><option value="all">Все записи</option><option value="folder">Папки</option><option value="file">Файлы</option></select></div></div>
       <div id="noty-catalog-content"></div><p id="noty-catalog-empty" hidden>Ничего не найдено. Измени запрос или тип записей.</p><footer class="noty-catalog-foot">Открой папку, чтобы перейти к её содержимому. Выбор для скачивания — в панели справа.</footer></section><aside id="noty-download-column" aria-label="Управление загрузками"></aside></main>`;
@@ -833,7 +932,7 @@
       <label for="retryBaseSeconds">Начальная задержка повтора, с</label><input id="retryBaseSeconds" type="number" min="1" max="60">
     </div><label><input id="autoRecover" type="checkbox" checked> Автоматически продолжать после Cloudflare / HTTP 403 / 429 / 503</label>
     <small>До 8 попыток за запуск с ожиданием 30–300 с; более долгий Retry-After соблюдается. «Пауза» отменяет автоматическое продолжение. Проверку с кликом нужно пройти самостоятельно.</small>
-    <small>Автотюн сравнивает 3 окна после прогрева. Настройки можно менять во время загрузки.</small></details>
+    <small>Автотюн учитывает байты и сохранённые файлы, проверяет результат возвратом к прежнему лимиту. Работает и в фоновой вкладке. При смене режима начатые файлы докачаются.</small></details>
     <button id="scan" class="primary">1. Найти файлы</button><button id="download" class="primary" disabled>2. Выбрать папку и скачать</button>
     <button id="pause" disabled>Пауза</button><button id="retry" disabled>Повторить ошибки</button><button id="export" disabled>Список ссылок</button>
     <button id="import">Загрузить JSON</button><input id="importFile" type="file" accept=".json,application/json" hidden>
@@ -898,7 +997,7 @@
   catch (e) { $('status').textContent = e.message; $('scan').disabled = true; return; }
   const state = { busy: false, pause: false, phase: '', folders: [root], visited: new Set(), files: new Map(),
     scanned: false, output: null, journal: null, queue: [], errors: [], done: 0, total: 0, logs: [],
-    received: 0, active: 0, rate: 0, transferredFiles: 0, fileRate: 0, completionSamples: [], cooldownUntil: 0, stopReason: '', preparing: false, ticker: null,
+    received: 0, active: 0, rate: 0, transferredFiles: 0, transferredBytes: 0, transferredSmall: 0, fileRate: 0, completionSamples: [], cooldownUntil: 0, stopReason: '', preparing: false, ticker: null,
     inFlightFolders: new Set(), knownFolders: new Set([root]), legacy: false, cacheAvailable: false,
     listGeneratedAt: new Date().toISOString(), completedPaths: new Set(), loadedBytes: new Map(), etaRate: 0,
     retrying: new Map(), retryEpoch: 0, autoPending: false, autoAttempts: 0, userPaused: false, recoveryBlocked: false, recoveryEpoch: 0, recovering: false,
@@ -927,10 +1026,18 @@
   fillSettings();
   function targetThreads() { return state.recovering ? 1 : settings.auto ? tuner.limit : settings.threads; }
   function showSpeed(refreshVolume = true) {
-    const best = tuner.best.rate > 0 ? `${tuner.best.threads} поток(а), ${(tuner.best.rate / 1048576).toFixed(2)} МиБ/с` : 'ещё измеряется';
+    const best = tuner.best.rate > 0 || tuner.best.fileRate > 0 ? `${tuner.best.threads} поток(а), ` +
+      (tuner.best.metric === 'files' ? `${tuner.best.fileRate.toFixed(2)} файлов/с` : formatRate(tuner.best.rate)) : 'ещё измеряется';
+    const phases = { baseline: 'замер', probe: 'проба лимита', confirm: 'контрольный замер', hold: 'удержание' };
+    const reasons = { waiting: 'ожидание', pause: 'пауза', retry: 'ожидание повтора', recovery: 'проверка доступа одним потоком',
+      draining: 'завершаю лишние задания', tail: 'остаток очереди', 'timer-gap': 'перерыв таймера; замер начнётся заново',
+      workload: 'состав файлов изменился', pacing: 'ограничение темпа запуска', plateau: 'прироста нет',
+      unconfirmed: 'прирост не подтвердился', ceiling: 'достигнут лимит', 'no-progress': 'нет данных о прогрессе' };
+    const tuneStatus = state.pause ? reasons.pause : state.recovering ? reasons.recovery : reasons[tuner.reason] || phases[tuner.phase];
     $('speed').textContent = `Сейчас: ${formatRate(state.rate)} · Средняя (до 30 с): ${state.etaRate > 0 ? formatRate(state.etaRate) : '—'}\n` +
       `Сохранение: ${state.fileRate > 0 ? state.fileRate.toLocaleString('ru-RU', { maximumFractionDigits: 2 }) : '—'} файлов/с · Активно: ${state.active} · Лимит: ${targetThreads()}\n` +
-      (settings.auto ? `Автотюн: ${ { baseline: 'замер', up: 'проба +1', hold: 'удержание', down: 'проба −1' }[tuner.phase]} · Лучший уровень: ${best}` : 'Ручной режим');
+      (settings.auto ? `Автотюн: ${tuneStatus} · Опорный уровень: ${best}` :
+        `Ручной режим: ${settings.threads} поток(а)` + (state.recovering ? ' · временно один поток для проверки доступа' : ''));
     $('metricCurrent').textContent = formatRate(state.rate);
     $('metricAverage').textContent = state.etaRate > 0 ? formatRate(state.etaRate) : '—';
     $('metricFiles').textContent = state.fileRate > 0 ? state.fileRate.toLocaleString('ru-RU', { maximumFractionDigits: 2 }) : '—';
@@ -970,7 +1077,7 @@
     $(key).onchange = () => {
       const input = { auto: $('auto').value === 'auto', autoRecover: $('autoRecover').checked };
       for (const name of settingKeys) input[name] = $(name).value;
-      settings = normalizeSettings(input); tuner = new AutoTuner(settings, performance.now());
+      settings = normalizeSettings(input); tuner.updateSettings(settings, performance.now());
       if (!settings.autoRecover) cancelRecovery();
       try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch { /* Optional persistence. */ }
       fillSettings(); showSpeed(); log('Настройки применены. Начатые файлы докачаются.');
@@ -1669,7 +1776,7 @@
   }
   async function downloadFile(item) {
     const started = performance.now();
-    state.jobs.set(item.path, { stage: 'waiting', sampleAt: started, sampleBytes: 0, dataAt: started, rate: 0 });
+    state.jobs.set(item.path, { stage: 'waiting', sampleAt: started, sampleBytes: 0, dataAt: started, rate: 0, sizeBytes: item.sizeBytes });
     const job = state.jobs.get(item.path), remote = remoteMetadata(item);
     state.loadedBytes.set(item.path, 0);
     const parts = localParts(item.path, root);
@@ -1704,6 +1811,7 @@
       if (lengthHeader !== null && /^\d+$/.test(lengthHeader) && !res.headers.get('content-encoding') && validSize(Number(lengthHeader))) {
         item.sizeBytes = Number(lengthHeader);
       }
+      job.sizeBytes = item.sizeBytes;
       reader = res.body.getReader();
       job.stage = 'download';
       const chunks = []; let initialSize = 0; let ended = false;
@@ -1756,7 +1864,8 @@
     state.stopReason = ''; state.rate = 0; state.etaRate = 0; state.fileRate = 0; state.completionSamples = [];
     let speedMeter = new SpeedMeter(), fileMeter = new SpeedMeter(), retryEpoch = state.retryEpoch;
     tuner.resetWindow(performance.now());
-    let lastTime = performance.now(), lastBytes = state.received, lastFiles = state.transferredFiles, previousEligible = false;
+    let lastTime = performance.now(), lastBytes = state.received, lastFiles = state.transferredFiles;
+    let lastSavedBytes = state.transferredBytes, lastSmall = state.transferredSmall;
     try {
       await runPool({ queue: state.queue, limit: targetThreads, paused: () => state.pause,
         delayMs: () => settings.delayMs, worker: item => retryOperation(item.path, () => downloadFile(item)),
@@ -1764,6 +1873,8 @@
           if (state.jobs.get(item.path)?.downloaded) {
             finishRecovery();
             state.transferredFiles++;
+            state.transferredBytes += item.sizeBytes;
+            if (item.sizeBytes <= 262144) state.transferredSmall++;
             state.completionSamples.push({ at: performance.now(), size: item.sizeBytes });
             if (state.completionSamples.length > 200) state.completionSamples.shift();
           }
@@ -1781,7 +1892,7 @@
           finishJob(item.path, e.pausedRetry ? 'paused' : 'error');
           if (e.pausedRetry) { state.queue.unshift(item); return; }
           log(item.path + ': ' + e.message);
-          tuner.resetWindow(performance.now()); previousEligible = false;
+          tuner.resetWindow(performance.now());
           if (e.stop || ['NotAllowedError', 'QuotaExceededError', 'NotReadableError'].includes(e.name)) {
             state.pause = true; state.queue.unshift(item);
             if (!state.stopReason) state.stopReason = e.message;
@@ -1807,20 +1918,27 @@
           const now = performance.now(), elapsed = now - lastTime;
           if (elapsed >= 1000) {
             const delta = state.received - lastBytes;
-            const eligible = !state.pause && !state.retrying.size && !document.hidden && active === targetThreads() && queued > 0;
+            const reason = state.pause ? 'pause' : state.recovering ? 'recovery' : state.retrying.size ? 'retry' :
+              active > targetThreads() ? 'draining' : queued === 0 ? 'tail' : '';
+            const work = { files: state.transferredFiles - lastFiles, completedBytes: state.transferredBytes - lastSavedBytes,
+              smallFiles: state.transferredSmall - lastSmall, active, reason,
+              largeActive: [...state.jobs.values()].some(job => !validSize(job.sizeBytes) || job.sizeBytes > 262144) };
             if (retryEpoch !== state.retryEpoch) {
               speedMeter = new SpeedMeter(); fileMeter = new SpeedMeter(); state.completionSamples = [];
-              lastFiles = state.transferredFiles; retryEpoch = state.retryEpoch; previousEligible = false;
+              lastFiles = state.transferredFiles; retryEpoch = state.retryEpoch;
             }
             state.rate = delta * 1000 / elapsed;
             state.etaRate = speedMeter.observe(delta, elapsed);
             state.fileRate = fileMeter.observe(state.transferredFiles - lastFiles, elapsed);
             lastFiles = state.transferredFiles;
             if (settings.auto) {
-              const decision = tuner.observe(delta, elapsed, eligible && previousEligible, now);
-              if (decision && decision.from !== decision.to) log(`Автотюн: ${decision.from} → ${decision.to}; замер ${(decision.rate / 1048576).toFixed(2)} МиБ/с.`);
+              const decision = tuner.observe(delta, elapsed, !reason, now, work);
+              if (decision && decision.from !== decision.to) log(`Автотюн: ${decision.from} → ${decision.to}; ` +
+                (decision.metric === 'files' ? `${decision.fileRate.toFixed(2)} файлов/с` : formatRate(decision.rate)) +
+                (decision.phase === 'confirm' ? '; контрольный замер прежнего лимита.' : '.'));
             }
-            previousEligible = eligible; lastTime = now; lastBytes = state.received;
+            lastSavedBytes = state.transferredBytes; lastSmall = state.transferredSmall;
+            lastTime = now; lastBytes = state.received;
             renderJobs(true);
           }
           showSpeed(elapsed >= 1000);

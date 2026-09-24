@@ -1120,67 +1120,6 @@ test('settings clamp unsafe limits and preserve independent scan settings', () =
   assert.equal(s.scanDelayMs, 500); assert.equal(s.auto, false);
 });
 
-function tuneDriver(settings = {}) {
-  const tuner = new core.AutoTuner({ windowSeconds: 5, ...settings });
-  let now = 0;
-  return { tuner,
-    step(rate, eligible = true, elapsed = 1000) { now += elapsed; return tuner.observe(rate * elapsed / 1000, elapsed, eligible, now); },
-    decision(rate) {
-      for (let i = 0; i < 100; i++) { const result = this.step(rate); if (result) return result; }
-      assert.fail('No tuner decision');
-    }
-  };
-}
-test('autotuner climbs with gains, rejects a slowdown and holds the best level', () => {
-  const d = tuneDriver();
-  assert.equal(d.decision(1000).to, 2);
-  assert.equal(d.decision(1700).to, 3);
-  assert.equal(d.decision(1400).to, 2);
-  assert.equal(d.tuner.phase, 'hold');
-  assert.equal(d.tuner.best.threads, 2);
-  assert.equal(d.decision(1700).to, 2);
-});
-test('autotuner rejects a plateau, honors ceiling and re-probes after a stable hold', () => {
-  const d = tuneDriver({ maxThreads: 2 });
-  assert.equal(d.decision(1000).to, 2);
-  assert.equal(d.decision(1070).to, 1);
-  for (let i = 0; i < 7; i++) assert.equal(d.decision(1000).to, 1);
-  assert.equal(d.decision(1000).to, 2);
-  assert.equal(d.decision(1700).to, 2);
-  assert.equal(d.tuner.phase, 'hold');
-});
-test('autotuner uses median windows and ignores underfilled or suspended sampling', () => {
-  const d = tuneDriver();
-  for (let i = 0; i < 100; i++) assert.equal(d.step(999999, false), null);
-  assert.equal(d.tuner.limit, 1);
-  assert.equal(d.step(999999, true, 6000), null);
-  // Warm up, then contaminate exactly one of three five-second windows.
-  for (let i = 0; i < 4; i++) d.step(1000);
-  for (let i = 0; i < 5; i++) d.step(1000);
-  for (let i = 0; i < 5; i++) d.step(1000000);
-  let result;
-  for (let i = 0; i < 5; i++) result = d.step(1000) || result;
-  assert.equal(result.rate, 1000);
-  assert.equal(result.to, 2);
-});
-test('autotuner tests a lower level after sustained degradation, and can reject it', () => {
-  const d = tuneDriver({ maxThreads: 3 });
-  d.decision(1000); d.decision(1800); d.decision(2400);
-  assert.equal(d.decision(1200).to, 3);
-  assert.equal(d.decision(1200).to, 2);
-  assert.equal(d.decision(800).to, 3);
-  assert.equal(d.tuner.phase, 'hold');
-  d.tuner.penalize(999999);
-  assert.equal(d.tuner.limit, 1); assert.equal(d.tuner.phase, 'baseline');
-});
-test('autotuner keeps a lower level if it restores aggregate throughput', () => {
-  const d = tuneDriver({ maxThreads: 3 });
-  d.decision(1000); d.decision(1800); d.decision(2400);
-  d.decision(1200); d.decision(1200);
-  assert.equal(d.decision(1600).to, 2);
-  assert.equal(d.tuner.best.threads, 2);
-});
-
 test('pool changes limits live, drains excess workers and never loses or duplicates jobs', async () => {
   let limit = 3, active = 0, peak = 0;
   const releases = new Map(), started = [], completed = [];
@@ -1445,6 +1384,107 @@ test('integration: changing settings updates the live UI and persists valid limi
   assert.equal(h.panel.getElementById('maxThreads').disabled, true);
   assert.equal(JSON.parse(h.dom.window.localStorage.getItem('noty-folder-settings-v1')).scanThreads, 5);
   await h.click('scan'); h.dom.window.close();
+});
+
+test('mode switching: running auto -> manual -> auto drains excess jobs and never duplicates a file', async () => {
+  const paths = Array.from({ length: 12 }, (_, i) => root + `/switch-${i}.pdf`), releases = [];
+  const responses = new Map(paths.map(path => [fileURL(path), () => new Promise(resolve =>
+    releases.push(() => resolve(new Response('%PDF-1.7\nok'))))]));
+  const h = createHarness(responses, new MemoryDir(), directoryURL(root), { settings: { threads: 4, maxThreads: 2 } });
+  let run;
+  try {
+    await importJSON(h, { root, files: paths.map(path => entry(path)) });
+    run = h.click('download'); await until(() => releases.length === 1);
+    setSettings(h, { auto: 'manual' }); await until(() => releases.length === 4);
+    assert.equal(h.panel.getElementById('metricActive').textContent, '4 / 4');
+    setSettings(h, { auto: 'auto' });
+    assert.equal(h.panel.getElementById('metricActive').textContent, '4 / 2');
+    const started = h.calls.length;
+    releases.shift()(); await until(() => h.panel.getElementById('metricActive').textContent === '3 / 2');
+    assert.equal(h.calls.length, started);
+    releases.shift()(); await until(() => h.panel.getElementById('metricActive').textContent === '2 / 2');
+    assert.equal(h.calls.length, started);
+    setSettings(h, { scanThreads: '5', maxRetries: '2' });
+    assert.equal(h.panel.getElementById('metricActive').textContent, '2 / 2');
+    releases.shift()(); await until(() => h.calls.length === started + 1);
+    setSettings(h, { auto: 'manual', threads: '3' }); await until(() => releases.length === 3);
+    for (let i = 0; i < 200 && !/Готово: 12\/12/.test(h.panel.getElementById('status').textContent); i++) {
+      releases.splice(0).forEach(f => f()); await turn();
+    }
+    await run;
+    assert.equal(h.calls.length, 12); assert.equal(new Set(h.calls).size, 12);
+    assert.equal(JSON.parse(h.dom.window.localStorage.getItem('noty-folder-settings-v1')).threads, 3);
+    const journal = h.destination.dirs.get(root).files.get('.noty-download-state.json');
+    assert.equal(Object.keys(JSON.parse(journal.data).completed).length, 12);
+  } finally { releases.splice(0).forEach(f => f()); await h.click('pause'); if (run) await run; h.dom.window.close(); }
+});
+
+test('mode switching on a manual pause never resumes the queue until requested', async () => {
+  const paths = Array.from({ length: 6 }, (_, i) => root + `/paused-${i}.pdf`), releases = [];
+  const responses = new Map(paths.map(path => [fileURL(path), () => new Promise(resolve => releases.push(() => resolve(new Response('%PDF-1.7\nok'))))]));
+  const h = createHarness(responses, new MemoryDir(), directoryURL(root), { settings: { auto: false, threads: 3 } });
+  let run;
+  try {
+    await importJSON(h, { root, files: paths.map(path => entry(path)) });
+    run = h.click('download'); await until(() => releases.length === 3);
+    await h.click('pause'); setSettings(h, { auto: 'auto', maxThreads: '2' });
+    releases.splice(0).forEach(f => f()); await run;
+    assert.equal(h.calls.length, 3);
+    assert.match(h.panel.getElementById('status').textContent, /паузе/);
+    setSettings(h, { auto: 'manual', threads: '4' }); setSettings(h, { auto: 'auto' });
+    await turn(); assert.equal(h.calls.length, 3);
+    run = h.click('download'); await until(() => releases.length === 2);
+    assert.match(h.panel.getElementById('metricActive').textContent, /\/ 2$/);
+    releases.splice(0).forEach(f => f()); await until(() => releases.length === 1);
+    releases.shift()(); await run;
+    assert.equal(new Set(h.calls).size, 6);
+  } finally { releases.splice(0).forEach(f => f()); await h.click('pause'); if (run) await run; h.dom.window.close(); }
+});
+
+test('integration: hidden tabs still supply completion samples to the autotuner', async () => {
+  const clock = { now: 0 }, paths = Array.from({ length: 40 }, (_, i) => root + `/background-${i}.pdf`);
+  const responses = new Map(paths.map(path => [fileURL(path), () => {
+    clock.now += 1000;
+    return new Response('%PDF-1.7\nsmall', { headers: { 'content-length': '14' } });
+  }]));
+  const h = createHarness(responses, new MemoryDir(), directoryURL(root), { clock, settings: { windowSeconds: 5 } });
+  try {
+    Object.defineProperty(h.dom.window.document, 'hidden', { value: true });
+    await importJSON(h, { root, files: paths.map(path => entry(path, 14)) });
+    await h.click('download');
+    assert.match(h.panel.getElementById('status').textContent, /Готово: 40\/40. Ошибок: 0/);
+    assert.match(h.panel.getElementById('log').textContent, /Автотюн: 1 → 2/);
+    assert.match(h.panel.getElementById('log').textContent, /файлов\/с/);
+  } finally { h.dom.window.close(); }
+});
+
+for (const initialAuto of [true, false]) test(`mode switching during recovery keeps the single probe (initial auto: ${initialAuto})`, async () => {
+  const clock = recoveryClock(), releases = [], paths = Array.from({ length: 9 }, (_, i) => root + `/mode-recovery-${i}.pdf`);
+  let blocked = true;
+  const responses = new Map(paths.map(path => [fileURL(path), () => blocked ?
+    new Response('blocked', { status: 403, headers: { 'cf-mitigated': 'challenge' } }) :
+    new Promise(resolve => releases.push(() => resolve(new Response('%PDF-1.7\nok'))))]));
+  const h = createHarness(responses, new MemoryDir(), directoryURL(root),
+    { recoveryClock: clock, settings: { auto: initialAuto, threads: 4, maxThreads: 3 } });
+  try {
+    await importJSON(h, { root, files: paths.map(path => entry(path)) }); await h.click('download');
+    setSettings(h, { auto: initialAuto ? 'manual' : 'auto' });
+    const stoppedCalls = h.calls.length; await turn(); assert.equal(h.calls.length, stoppedCalls);
+    blocked = false; await clock.advance(30000); clock.ready(h);
+    await until(() => releases.length === 1);
+    setSettings(h, { auto: initialAuto ? 'auto' : 'manual' });
+    assert.match(h.panel.getElementById('metricActive').textContent, /\/ 1$/);
+    await turn(); assert.equal(releases.length, 1);
+    releases.shift()();
+    const expected = initialAuto ? 3 : 4;
+    await until(() => releases.length === expected);
+    assert.equal(h.panel.getElementById('metricActive').textContent, `${expected} / ${expected}`);
+    for (let i = 0; i < 200 && !/Готово: 9\/9/.test(h.panel.getElementById('status').textContent); i++) {
+      releases.splice(0).forEach(f => f()); await turn();
+    }
+    await until(() => /Готово: 9\/9. Ошибок: 0/.test(h.panel.getElementById('status').textContent));
+    assert.equal(JSON.parse(h.dom.window.localStorage.getItem('noty-folder-settings-v1')).threads, 4);
+  } finally { releases.splice(0).forEach(f => f()); h.dom.window.close(); }
 });
 
 test('integration: a mid-scan checkpoint includes active folders, and new JSON resumes them', async () => {

@@ -59,6 +59,14 @@ ${files.map(name => row(fileURL(name), name, '♪', '5.36 MiB')).join('')}</tabl
     await page.locator('#auto').selectOption('manual');
     await page.locator('#threads').fill('4'); await page.locator('#threads').dispatchEvent('change');
     assert.equal(await page.locator('#threads').inputValue(), '4');
+    await page.locator('#auto').selectOption('auto');
+    assert.equal(await page.locator('#metricActive').textContent(), '0 / 4', 'Auto starts from the manual preference');
+    await page.locator('#scanThreads').fill('5'); await page.locator('#scanThreads').dispatchEvent('change');
+    assert.equal(await page.locator('#metricActive').textContent(), '0 / 4', 'Scan edits preserve the auto limit');
+    await page.locator('#maxThreads').fill('2'); await page.locator('#maxThreads').dispatchEvent('change');
+    assert.equal(await page.locator('#metricActive').textContent(), '0 / 2');
+    await page.locator('#auto').selectOption('manual');
+    assert.equal(await page.locator('#metricActive').textContent(), '0 / 4', 'The auto cap must not replace the manual preference');
     const scanBox = await page.locator('#scan').boundingBox();
     assert(scanBox.y >= 0 && scanBox.y + scanBox.height <= 1040, 'Main action remains in view');
     await page.locator('summary').filter({ hasText: 'Потоки и автотюн' }).click();

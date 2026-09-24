@@ -199,27 +199,75 @@ already-started work finish before more work starts.
 | Automatic retries after a transient failure | 3 | 0–8 |
 | Initial retry delay | 2 s | 1–60 s |
 
-Automatic mode starts with one file and tests one additional simultaneous file
-at a time. Each level warms up for one window and then compares the median of
-three aggregate-throughput windows. A gain above the configured threshold keeps
-the new level; a plateau or decline returns to the best measured level. At the
-defaults a new level normally needs about 40 seconds of usable measurements.
-The retained level is tested upward again after two minutes of stable measured
-operation. Two consecutive measurement groups more than 20% below the reference
-trigger a trial with one fewer file; it is retained only if throughput is within
-the configured tolerance or better.
+### Autotuner 3.2.0
 
-Calibration needs a visible tab, a filled worker pool, and remaining queued
-files. Pauses, errors, underfilled queues and long sampling gaps reset the
-measurement window. Downloads may continue in a hidden tab, but tuning waits
-until the tab is visible again. Short runs may finish before a useful comparison.
+A fresh automatic session starts with one worker. It measures two windows after
+up to two seconds of warm-up; bursty measurements get a third window and a
+median rate. At the defaults, one measurement normally takes 22-32 seconds.
+Partially occupied workers no longer discard all accumulated measurements.
+
+For completed small files (at least five completions, all at most 256 KiB, and
+no large or unknown-size active files), tuning uses successful saved files/s.
+For other workloads it uses received bytes/s, with a completion-rate guard for
+mixed queues. Completions count only after file close and journal persistence;
+verified local skips do not count as downloads. Neither rates nor ETA are
+multiplied into a synthetic speed.
+
+A promising new worker count must also beat a fresh measurement at the old
+count: baseline A, trial B, return to A. This reduces accidental attribution of
+server/workload changes to concurrency. A change in metric or a completed mean
+file-size ratio outside 0.5-2 invalidates a comparison. The configured gain
+threshold and observed noise determine acceptance. Lower counts may be retained
+within a maximum eight-percent tolerance to avoid needless concurrent requests.
+
+Hold periods last at least 30 seconds (40 at default settings). The reference
+keeps updating, including at one worker after a persistent slowdown. Bounded
+periodic exploration can test two extra workers to look past a local plateau;
+all probes obey the configured maximum. At the ceiling, occasional lower-count
+probes check whether fewer workers can do the same work. These probes and their
+confirmation temporarily change the live worker limit by design.
+
+Tuning also works in hidden tabs while timer observations remain usable. A gap
+above 30 seconds starts a fresh measurement; browser suspension cannot be
+prevented. Pause, retry waits, access recovery and the end of the queue suspend
+tuning with an explicit status. A drain after lowering the limit preserves the
+pending comparison until the excess jobs finish. Underfilled probes still
+finish, even when launch pacing limits useful concurrency.
+
+### Switching modes while running
+
+- **Auto -> manual:** apply the saved manual worker preference, not the last
+  automatic probe count. It can exceed the separate automatic maximum.
+- **Manual -> auto:** start from the current manual preference, capped by the
+  automatic maximum, with fresh measurements. It does not restart at one.
+- Lowering a limit lets existing jobs finish; it does not cancel their files.
+  No new jobs start while occupancy meets or exceeds the new limit.
+- A switch on pause does not resume the queue. During cooldown it does not
+  bypass the wait. During access recovery the temporary one-worker cap remains
+  until a successful transfer; the selected mode then determines the limit.
+- Scan, retry and auto-recovery settings do not discard learned concurrency.
+  Changing the automatic ceiling, measurement window, gain threshold or launch
+  delay starts fresh measurements at the current (possibly clamped) count.
+- The manual preference and mode persist in settings; automatic measurements
+  are session-local and do not survive a page reload.
+
+The global launch delay still protects the server from bursts. Scheduler
+wake-ups now respect the next start deadline rather than adding a fixed 200 ms
+idle wait. More workers cannot eliminate the configured launch delay, slow
+journal writes or a saturated network connection.
+
 The display separately reports recent received bytes/s, the weighted average
 over up to 30 seconds, successfully saved files/s, active jobs and the chosen
-limit. Units adapt to the rate: low speeds use KiB/s rather than rounding to
-0.01 MiB/s. Both active-job displays update from the same scheduler tick.
-This is a heuristic over browser-received bytes, not a guaranteed global optimum
-or a raw network-link measurement. File sizes, server variation and disk writes
-can affect it. Journal writes are serialized even with concurrent downloads.
+limit. The reference level uses the metric currently being compared; it is not
+a claim of a global optimum. Rates adapt their units, and both active-job
+counts update from the same scheduler tick.
+
+The algorithm remains a heuristic: heterogeneous files and rapidly varying
+server or disk performance can still mislead comparisons. A known good fixed
+worker count avoids calibration overhead. Journal writes remain serialized.
+The automated simulation suite covers small/large jobs, launch pacing and mode
+switches using the actual scheduler; these are offline synthetic workloads,
+not performance promises for the live archive.
 
 Folder discovery uses its own fixed, adjustable pool and delay, without speed
 autotuning. Newly discovered subfolders enter the queue once. A narrow directory
