@@ -4,7 +4,9 @@ const path = require('node:path');
 const assert = require('node:assert/strict');
 const { chromium } = require('playwright');
 const origin = 'https://noty.propovednik.com';
-const source = fs.readFileSync(path.join(__dirname, 'noty-folder-downloader.user.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '..', 'noty-folder-downloader.user.js'), 'utf8');
+const artifacts = path.join(__dirname, '..', 'artifacts');
+fs.mkdirSync(artifacts, { recursive: true });
 const folders = ['ENGLISH', 'АККОРДЕОН-БАЯН', 'ВОКАЛ-ХОР', 'ГАРМОНИЯ', 'ГИТАРА', 'ГРАФИКА',
   'ДУХОВНЫЕ ОСНОВЫ МУЗЫКИ ЕХБ', 'ИНСТРУМЕНТОВКА-АРАНЖИРОВКА', 'МУЗ ФОРМА', 'Научно познавательная',
   'ПИАНО', 'ПОЛИФОНИЯ', 'СОЛЬФЕДЖИО', 'ТЕОРИЯ МУЗЫКИ'];
@@ -74,7 +76,7 @@ ${files.map(name => row(fileURL(name), name, '♪', '5.36 MiB')).join('')}</tabl
       // Long names wrap inside the catalog rather than requiring horizontal panning.
       const tableFits = await page.locator('#noty-catalog-content').evaluate(el => el.scrollWidth <= el.clientWidth + 1);
       assert(tableFits, name + ': catalog should fit the panel');
-      await page.screenshot({ path: path.join(__dirname, `preview-ui-${name}.png`), fullPage: width < 1100 });
+      await page.screenshot({ path: path.join(artifacts, `preview-ui-${name}.png`), fullPage: width < 1100 });
     }
     // File listing filters stay usable at phone width, including long filenames.
     await page.locator('#noty-catalog-kind').selectOption('file');
@@ -115,7 +117,7 @@ ${files.map(name => row(fileURL(name), name, '♪', '5.36 MiB')).join('')}</tabl
       assert(bounds.x >= 0 && bounds.y >= 0 && bounds.x + bounds.width <= width && bounds.y + bounds.height <= height, label + ': editor fits the viewport');
       assert(await page.locator('#manifestEditor').evaluate(el => el.scrollWidth <= el.clientWidth), label + ': no horizontal editor overflow');
       assert(await page.locator('.editor-table-wrap').evaluate(el => el.clientHeight > 80), label + ': table has usable scroll space');
-      await page.screenshot({ path: path.join(__dirname, `preview-editor-${label}.png`) });
+      await page.screenshot({ path: path.join(artifacts, `preview-editor-${label}.png`) });
     }
     await page.keyboard.press('Escape'); assert(!await page.locator('#manifestEditor').isVisible());
     assert.deepEqual(errors, []);

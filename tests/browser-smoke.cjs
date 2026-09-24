@@ -6,7 +6,9 @@ const { chromium } = require('playwright');
 const root = '_УЧЕБНИКИ';
 const origin = 'https://noty.propovednik.com';
 const urlFor = name => origin + '/Public/' + encodeURIComponent(root) + '/' + name;
-const source = fs.readFileSync(path.join(__dirname, 'noty-folder-downloader.user.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '..', 'noty-folder-downloader.user.js'), 'utf8');
+const artifacts = path.join(__dirname, '..', 'artifacts');
+fs.mkdirSync(artifacts, { recursive: true });
 
 (async () => {
   const candidates = [process.env.BROWSER_PATH, 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
@@ -14,7 +16,7 @@ const source = fs.readFileSync(path.join(__dirname, 'noty-folder-downloader.user
   const executablePath = candidates.find(p => fs.existsSync(p));
   const browser = await chromium.launch({ headless: true, ...(executablePath ? { executablePath } : {}) });
   try {
-    const context = await browser.newContext({ viewport: { width: 1280, height: 1000 } });
+    const context = await browser.newContext({ viewport: { width: 1280, height: 1000 }, serviceWorkers: 'block' });
     const page = await context.newPage(); page.setDefaultTimeout(15000);
     const errors = []; page.on('pageerror', e => errors.push(e.message));
     let revision = 1;
@@ -28,15 +30,14 @@ const source = fs.readFileSync(path.join(__dirname, 'noty-folder-downloader.user
       const url = new URL(route.request().url());
       if (url.origin !== origin) return route.abort();
       if (url.pathname === '/') {
-        if (url.searchParams.has('noty_helper')) {
-          return route.fulfill({ status: 302, headers: { location: origin + '/?dir=' + encodeURIComponent(root) } });
-        }
         if (route.request().frame().page() !== page) {
           helperNavigations++;
           const helperNow = await page.evaluate(() => Date.now());
           return route.fulfill({ headers: { 'Cross-Origin-Opener-Policy': 'same-origin' }, contentType: 'text/html; charset=utf-8', body: '<!doctype html><html><head><meta charset="utf-8"></head><body>' +
             (helperBlocked ? '<h1>Cloudflare: Just a moment</h1>' : '<table><tr><th>File name</th><th>Size</th></tr></table>') +
-            `<script>Date.now = () => ${helperNow}; window.opener = null;</script><script>` + source.replaceAll('</script', '<\\/script') + '</script></body></html>' });
+            // Strip launch parameters before script execution without an HTTP
+            // redirect: Playwright may not route a redirected request again.
+            `<script>history.replaceState(null, '', '/?dir=' + encodeURIComponent(${JSON.stringify(root)})); Date.now = () => ${helperNow}; window.opener = null;</script><script>` + source.replaceAll('</script', '<\\/script') + '</script></body></html>' });
         }
         const names = ['first.pdf', 'second.pdf', 'third.pdf', 'audio.mp3', ...(revision === 2 ? ['new.pdf'] : [])];
         return route.fulfill({ contentType: 'text/html; charset=utf-8', body: '<!doctype html><html><head><meta charset="utf-8"><title>Offline downloader acceptance fixture</title></head>' +
@@ -128,7 +129,7 @@ const source = fs.readFileSync(path.join(__dirname, 'noty-folder-downloader.user
     await page.locator('#selectionDetails > summary').click();
     await page.locator('#includeExt').fill('pdf'); await page.locator('#includeExt').dispatchEvent('change');
     assert.match(await page.locator('#selectionInfo').innerText(), /Выбрано 3 из 4/);
-    await page.screenshot({ path: path.join(__dirname, 'preview-selection.png') });
+    await page.screenshot({ path: path.join(artifacts, 'preview-selection.png') });
     await page.locator('#selectionDetails > summary').click(); await page.locator('#verifyDetails > summary').click();
     await page.locator('#verify').click(); await page.getByText('Проверка завершена.', { exact: false }).waitFor();
     assert.equal(fetched.length, 0);
@@ -139,7 +140,7 @@ const source = fs.readFileSync(path.join(__dirname, 'noty-folder-downloader.user
     await page.locator('#reportRows input[type=checkbox]').check(); await page.locator('#replaceSelected').click();
     await page.getByText('Готово: 1/1. Ошибок: 0.', { exact: true }).waitFor();
     assert.equal(await page.evaluate(root => window.testReadFile(root + '/first.pdf'), root), '%PDF-1.7\nfirst');
-    await page.screenshot({ path: path.join(__dirname, 'preview-verification.png') });
+    await page.screenshot({ path: path.join(artifacts, 'preview-verification.png') });
     revision = 2;
     await page.locator('#verifyDetails > summary').click(); await page.locator('#updateDetails > summary').click();
     await page.locator('#updateScan').click(); await page.getByText('Найдено 5 файлов в 1 папках.', { exact: false }).waitFor();
@@ -193,7 +194,7 @@ const source = fs.readFileSync(path.join(__dirname, 'noty-folder-downloader.user
     await page.evaluate(() => window.advanceRecoveryTest(60000));
     await page.getByText('Готово: 1/1. Ошибок: 0.', { exact: true }).waitFor();
     assert.equal(helperNavigations, 3); assert.equal(fetched.length, beforeRecovery + 1);
-    await helper.screenshot({ path: path.join(__dirname, 'preview-helper.png') });
+    await helper.screenshot({ path: path.join(artifacts, 'preview-helper.png') });
     assert.equal(await page.evaluate(root => window.testReadFile(root + '/new.pdf'), root), '%PDF-1.7\nfirst');
     // Catalog access is already available, but the HTML resource remains blocked.
     // The helper must visit that exact resource and wait through its challenge.
@@ -214,7 +215,7 @@ const source = fs.readFileSync(path.join(__dirname, 'noty-folder-downloader.user
     assert.equal(htmlNavigations, 2); assert.equal(fetched.length, beforeHTML + 1);
     assert.equal(await page.evaluate(root => window.testReadFile(root + '/nnn.htm'), root), htmlLesson);
     assert.equal(await helper.locator('#noty-folder-helper').count(), 0);
-    await helper.screenshot({ path: path.join(__dirname, 'preview-html-recovery.png') });
+    await helper.screenshot({ path: path.join(artifacts, 'preview-html-recovery.png') });
     const repairFiles = ['index(1).php', 'bad-content.pdf', 'last-good.pdf'];
     await page.locator('#importFile').setInputFiles({ name: 'php-repair.json', mimeType: 'application/json',
       buffer: Buffer.from(JSON.stringify({ root, files: repairFiles.map(name => ({ path: root + '/' + name, url: urlFor(name) })) })) });
@@ -342,7 +343,7 @@ const source = fs.readFileSync(path.join(__dirname, 'noty-folder-downloader.user
       await page.setViewportSize({ width, height: 1040 });
       await page.locator('#rateChartBlock').scrollIntoViewIfNeeded();
       assert(await page.locator('#rateChartBlock').evaluate(el => el.scrollWidth <= el.clientWidth), 'Chart legend fits ' + label);
-      await page.locator('#rateChartBlock').screenshot({ path: path.join(__dirname, `preview-rates-${label}.png`) });
+      await page.locator('#rateChartBlock').screenshot({ path: path.join(artifacts, `preview-rates-${label}.png`) });
     }
     assert.deepEqual(errors, []);
     console.log('Browser acceptance passed: selection/filtering, verification/repair/replacement, updates, recovery, helper close/reopen, PHP HTML, format/name errors, plain-403 removal, tilde directory mapping and cached restart; zero page errors.');

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Move test runners to `tests/` and screenshots to ignored `artifacts/`; remove
+  the internal development plan and old local generated results.
+- Keep helper query-stripping fixtures inside the mocked browser route instead
+  of following an HTTP redirect that could reach the live archive.
 - Prepare the public repository with a concise installation guide, MIT license,
   GitHub userscript metadata and automated offline tests.
 - Make the denied-link cache regression independent of another worker learning

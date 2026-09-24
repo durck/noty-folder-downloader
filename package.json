@@ -9,10 +9,10 @@
   },
   "description": "Folder-preserving userscript for the public music archive",
   "scripts": {
-    "test": "node --test test.cjs",
+    "test": "node --test tests/test.cjs",
     "check": "node --check noty-folder-downloader.user.js",
-    "test:browser": "node browser-smoke.cjs",
-    "test:ui": "node ui-smoke.cjs"
+    "test:browser": "node tests/browser-smoke.cjs",
+    "test:ui": "node tests/ui-smoke.cjs"
   },
   "devDependencies": {
     "fake-indexeddb": "^6.2.5",

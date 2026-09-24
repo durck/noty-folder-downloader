@@ -49,6 +49,16 @@ and the [changelog](CHANGELOG.md) for version history.
 
 ## Development
 
+Project layout:
+
+```text
+noty-folder-downloader.user.js   Installable userscript
+tests/                          Automated and browser tests
+docs/GUIDE.md                   Detailed user guide
+.github/workflows/              Continuous integration
+artifacts/                      Generated screenshots/logs (ignored)
+```
+
 Use Node.js 24 or newer:
 
 ```sh
@@ -63,7 +73,8 @@ npm run test:ui
 Browser tests use an isolated profile and offline fixtures; they do not download
 the real archive. They use a locally installed Edge/Chrome when available,
 otherwise Playwright Chromium. Set `BROWSER_PATH` to override the executable.
-Generated screenshots, logs, dependencies and downloaded manifests are ignored.
+Generated screenshots go to `artifacts/`. Logs, dependencies and downloaded
+manifests are also ignored.
 
 Report reproducible problems in [Issues](https://github.com/durck/noty-folder-downloader/issues).
 Include the script version and a short sanitized error log; omit personal paths

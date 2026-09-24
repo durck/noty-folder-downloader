@@ -534,7 +534,9 @@ Tampermonkey environment.
 selective repair, reviewed replacement and update comparison in a fresh headless
 browser profile. It also checks actual helper-tab navigation, full-load readiness
 and automatic continuation, including BroadcastChannel with a missing opener
-and HTTP redirects stripping helper parameters before userscript execution.
+and helper parameters stripped before userscript execution. The fixture uses
+history replacement to simulate the final URL without an HTTP redirect that
+could escape Playwright request routing and reach the live archive.
 It also keeps the catalog accessible while an HTML file remains challenged,
 navigates the helper to that exact file, waits through another challenge, then
 verifies that the original HTML bytes are saved after automatic continuation.
@@ -627,11 +629,8 @@ sortable headers and long filenames. Screenshots are saved as
 `preview-ui-mobile.png`. The live site presented a Cloudflare check during this
 redesign; validation does not claim a live-site or installed-userscript test.
 
-## Improvement plan
-
-See [DEVELOPMENT.md](DEVELOPMENT.md) for the completed six-stage roadmap and validation: automatic
-retries, directory verification, folder selection, file filters, detailed
-progress, and incremental local-archive updates.
+Generated screenshots mentioned in this guide are stored in `artifacts/` at
+the project root and are excluded from Git.
 
 References:
 - https://www.tampermonkey.net/documentation.php
