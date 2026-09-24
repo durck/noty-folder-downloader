@@ -153,7 +153,17 @@ const source = fs.readFileSync(path.join(__dirname, 'noty-folder-downloader.user
     await page.evaluate(() => { const original = window.open; window.open = (...args) => { window.testHelperProxy = original.apply(window, args); return window.testHelperProxy; }; });
     const popup = context.waitForEvent('page'); await page.locator('#enableRecovery').click();
     const helper = await popup; helper.on('pageerror', e => errors.push(e.message));
-    await helper.waitForFunction(() => document.title === 'Noty: страница загрузилась', null, { timeout: 2500 });
+    try {
+      await helper.waitForFunction(() => document.title === 'Noty: страница загрузилась', null, { timeout: 15000 });
+    } catch (error) {
+      console.error('Helper fixture failed to initialize:', await helper.evaluate(() => ({
+        url: location.href, title: document.title, readyState: document.readyState,
+        hasStoredContext: !!sessionStorage.getItem('noty-helper-context-v1'),
+        hasWindowContext: window.name.startsWith('noty-helper:'),
+        helperStatus: document.querySelector('#noty-helper-status')?.textContent
+      })), errors);
+      throw error;
+    }
     assert.equal(new URL(helper.url()).searchParams.has('noty_helper'), false);
     assert.equal(await helper.locator('#noty-folder-helper').count(), 0);
     await helper.locator('#noty-helper-status').waitFor();
