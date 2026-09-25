@@ -613,6 +613,14 @@ exported JSON does not retry it. The current error export retains the path and
 reason; retry and repair ignore removed links. An empty manifest is also saved.
 Cache failure is reported; export the edited JSON if persistence is unavailable.
 A fresh scan or importing an older JSON can rediscover removed links.
+Since 3.2.2, a successfully completed response containing zero file bytes
+also removes that link from the manifest, cache and subsequent JSON exports.
+The diagnostic remains in the current error export, marked as excluded; it is
+not offered for retry or repair. This also handles successful responses with
+no body. An empty partial response or an uncompressed response advertising a
+nonzero Content-Length remains retryable. Stream failures follow the existing
+network recovery policy. Existing local files are never deleted by exclusion;
+an empty local placeholder alone does not establish that the remote file is empty.
 Confirmed challenges (header or challenge markup) preserve their links and use
 bounded recovery. A directory denial keeps the scan incomplete. This replaces
 the broad file-403 recovery policy from 3.1.2.

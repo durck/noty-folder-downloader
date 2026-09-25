@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Noty: скачать папку целиком
 // @namespace    local.noty-folder-downloader
-// @version      3.2.1
+// @version      3.2.2
 // @license      MIT
 // @homepageURL  https://github.com/durck/noty-folder-downloader
 // @supportURL   https://github.com/durck/noty-folder-downloader/issues
@@ -1098,7 +1098,7 @@
     const retryable = state.errors.length - excluded;
     $('eta').textContent = (failedPaths.size ? 'До конца очереди: ' : 'До конца: ') + eta +
       (retryable ? `; ошибки: ${retryable} — не включены в оценку, требуют повтора` : '') +
-      (excluded ? `; удалено ссылок с HTTP 403: ${excluded}` : '');
+      (excluded ? `; удалено ссылок: ${excluded}` : '');
   }
   for (const key of ['auto', 'autoRecover', ...settingKeys]) {
     $(key).onchange = () => {
@@ -1833,8 +1833,16 @@
     resetTimeout();
     try {
       const res = await fetchChecked(item.url, controller.signal);
-      if (!res.body) throw new Error('Пустой ответ сервера');
       const lengthHeader = res.headers.get('content-length');
+      const emptyFileError = () => {
+        // An incomplete advertised body is retryable, not an empty remote file.
+        if (res.status === 206 || (!res.headers.get('content-encoding') && /^\d+$/.test(lengthHeader || '') && Number(lengthHeader) > 0)) {
+          return transient(new Error('Файл загрузился не полностью'));
+        }
+        return Object.assign(new Error('Пустой файл на сервере; удаляю ссылку из списка и кеша, продолжаю остальные.'),
+          { excludeFromManifest: true, url: item.url });
+      };
+      if (!res.body) throw emptyFileError();
       if (lengthHeader !== null && /^\d+$/.test(lengthHeader) && !res.headers.get('content-encoding') && validSize(Number(lengthHeader))) {
         item.sizeBytes = Number(lengthHeader);
       }
@@ -1849,7 +1857,7 @@
         state.loadedBytes.set(item.path, (state.loadedBytes.get(item.path) || 0) + part.value.byteLength);
         chunks.push(part.value); initialSize += part.value.byteLength;
       }
-      if (!initialSize) throw new Error('Пустой файл');
+      if (!initialSize) throw emptyFileError();
       const header = new Uint8Array(Math.min(initialSize, 8192));
       let offset = 0;
       for (const chunk of chunks) { const n = Math.min(chunk.length, header.length - offset); header.set(chunk.subarray(0, n), offset); offset += n; }

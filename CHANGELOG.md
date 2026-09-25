@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### 3.2.2
+
+- Remove successfully received empty remote files from the manifest, cache and
+  JSON export, using the existing exclusion policy for ordinary file HTTP 403.
+  Keep the diagnostic reason but omit excluded links from retry and repair.
+- Retain incomplete nonzero-length and empty partial responses for retry;
+  preserve existing local files when an empty replacement is rejected.
+- Cover empty response variants, cache reload, exports, local preservation and
+  retry behavior in regression and browser acceptance tests.
+
 ### 3.2.1
 
 - Keep a common tuning metric through each baseline/trial/confirmation so

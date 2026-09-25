@@ -84,6 +84,7 @@ fs.mkdirSync(artifacts, { recursive: true });
         if (/\/(?:\._\.DS_Store|denied-score\.pdf)$/.test(url.pathname)) {
           return route.fulfill({ status: 403, contentType: 'text/html', body: '<html><h1>403 Forbidden</h1><hr>nginx/1.18.0</html>' });
         }
+        if (url.pathname.endsWith('/empty-score.pdf')) return route.fulfill({ status: 200, body: '' });
         return route.fulfill({ contentType: 'application/pdf', body: '%PDF-1.7\nfirst' });
       }
       return route.abort();
@@ -240,21 +241,22 @@ fs.mkdirSync(artifacts, { recursive: true });
     assert.deepEqual(fetched.slice(beforeBlocked), ['z-after-ini.pdf']);
     assert.equal(await page.evaluate(root => window.testReadFile(root + '/rimm_1.ini'), root), null);
     assert.equal(await page.evaluate(root => window.testReadFile(root + '/z-after-ini.pdf'), root), '%PDF-1.7\nfirst');
-    const deniedFiles = ['._.DS_Store', 'denied-score.pdf', 'z-after-denied.pdf'];
+    const deniedFiles = ['._.DS_Store', 'denied-score.pdf', 'empty-score.pdf', 'z-after-denied.pdf'];
     await page.locator('#importFile').setInputFiles({ name: 'denied.json', mimeType: 'application/json',
       buffer: Buffer.from(JSON.stringify({ root, files: deniedFiles.map(name => ({ path: root + '/' + name, url: urlFor(name) })) })) });
     await page.getByText('JSON загружен:', { exact: false }).waitFor();
     const beforeDenied = fetched.length;
-    await page.locator('#download').click(); await page.getByText('Готово: 1/3. Ошибок: 2.', { exact: true }).waitFor();
+    await page.locator('#download').click(); await page.getByText('Готово: 1/4. Ошибок: 3.', { exact: true }).waitFor();
     assert.deepEqual(fetched.slice(beforeDenied).sort(), [...deniedFiles].sort());
     assert.equal(helperNavigations, 3); assert.equal(htmlNavigations, 2);
     assert.equal(await page.evaluate(root => window.testReadFile(root + '/denied-score.pdf'), root), null);
+    assert.equal(await page.evaluate(root => window.testReadFile(root + '/empty-score.pdf'), root), null);
     assert.equal(await page.evaluate(root => window.testReadFile(root + '/z-after-denied.pdf'), root), '%PDF-1.7\nfirst');
     assert.equal(await page.locator('#retry').isDisabled(), true);
     await page.locator('#cache').click();
     await page.locator('#selectionInfo').filter({ hasText: 'Выбрано 1 из 1' }).waitFor();
     await page.locator('#download').click(); await page.getByText('Готово: 1/1. Ошибок: 0.', { exact: true }).waitFor();
-    assert.equal(fetched.length, beforeDenied + 3, 'Cached list never requests denied files again');
+    assert.equal(fetched.length, beforeDenied + 4, 'Cached list never requests denied or empty files again');
     await page.locator('#importFile').setInputFiles({ name: 'tilde-directory.json', mimeType: 'application/json',
       buffer: Buffer.from(JSON.stringify({ root, files: [{ path: root + '/~PV_Contents/0000.pdf', url: urlFor('~PV_Contents/0000.pdf') }] })) });
     await page.getByText('JSON загружен:', { exact: false }).waitFor();

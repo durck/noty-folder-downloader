@@ -454,7 +454,7 @@ for (const threads of [1, 4]) test(`bare 403 on macOS metadata is an item error 
     assert.deepEqual(data.files.map(f => f.path).sort(), paths.slice(3).sort());
     assert.deepEqual((await core.cacheRequest(h.dom.window.indexedDB, root)).files.map(f => f.path).sort(), paths.slice(3).sort());
     assert.equal(h.panel.getElementById('retry').disabled, true);
-    assert.match(h.panel.getElementById('eta').textContent, /удалено ссылок с HTTP 403: 3/);
+    assert.match(h.panel.getElementById('eta').textContent, /удалено ссылок: 3/);
     assert.doesNotMatch(h.panel.getElementById('eta').textContent, /требуют повтора/);
     await h.click('retry'); assert.equal(h.calls.length, 5);
     assert.equal(clock.urls.length, 0, 'Removed files never enter the retry queue');
@@ -1384,6 +1384,78 @@ test('integration: changing settings updates the live UI and persists valid limi
   assert.equal(h.panel.getElementById('maxThreads').disabled, true);
   assert.equal(JSON.parse(h.dom.window.localStorage.getItem('noty-folder-settings-v1')).scanThreads, 5);
   await h.click('scan'); h.dom.window.close();
+});
+
+for (const response of [
+  { body: '', status: 200 },
+  { body: '', status: 200, headers: { 'content-length': '0' } },
+  { body: null, status: 204 },
+  { body: null, status: 205 },
+  { body: '', status: 200, headers: { 'content-encoding': 'gzip', 'content-length': '20' } }
+]) test(`empty remote file is removed from manifest/cache/export (${JSON.stringify(response)})`, async () => {
+  const db = new IDBFactory(), empty = root + '/empty.pdf', good = root + '/good.pdf';
+  const responses = new Map([[fileURL(empty), response], [fileURL(good), { body: '%PDF-1.7\ncontent' }]]);
+  let h = createHarness(responses, new MemoryDir(), directoryURL(root), { indexedDB: db, settings: { auto: false, threads: 4 } });
+  try {
+    await importJSON(h, { root, files: [entry(empty), entry(good)] }); await h.click('download');
+    const data = await exportedJSON(h, 'export');
+    assert.deepEqual(data.files.map(f => f.path), [good]);
+    assert.equal(data.errors.length, 1); assert.equal(data.errors[0].excluded, true);
+    assert.match(data.errors[0].error, /Пустой файл/);
+    assert.deepEqual((await core.cacheRequest(db, root)).files.map(f => f.path), [good]);
+    assert.equal(h.destination.dirs.get(root).files.has('empty.pdf'), false);
+    assert.equal(h.panel.getElementById('retry').disabled, true);
+    assert.match(h.panel.getElementById('eta').textContent, /удалено ссылок: 1/);
+    assert.doesNotMatch(h.panel.getElementById('eta').textContent, /требуют повтора/);
+    await h.click('retry'); assert.equal(h.calls.length, 2);
+    h.dom.window.close(); h = createHarness(responses, new MemoryDir(), directoryURL(root), { indexedDB: db });
+    await until(() => !h.panel.getElementById('cache').disabled); await h.click('cache');
+    await h.click('download'); assert.deepEqual(h.calls, [fileURL(good)]);
+  } finally { h.dom.window.close(); }
+});
+
+test('an all-empty remote manifest stays empty after cache reload', async () => {
+  const db = new IDBFactory(), path = root + '/empty.pdf';
+  let h = createHarness(new Map([[fileURL(path), { body: '' }]]), new MemoryDir(), directoryURL(root), { indexedDB: db });
+  try {
+    await importJSON(h, { root, files: [entry(path)] }); await h.click('download');
+    assert.deepEqual((await exportedJSON(h, 'export')).files, []);
+    assert.deepEqual(core.validateManifest(await core.cacheRequest(db, root)).files, []);
+    h.dom.window.close(); h = createHarness(new Map(), new MemoryDir(), directoryURL(root), { indexedDB: db });
+    await until(() => !h.panel.getElementById('cache').disabled); await h.click('cache');
+    assert.deepEqual((await exportedJSON(h, 'export')).files, []);
+    assert.equal(h.panel.getElementById('download').disabled, true);
+  } finally { h.dom.window.close(); }
+});
+
+for (const response of [{ body: '', headers: { 'content-length': '100' } }, { body: '', status: 206 }]) {
+  test(`empty incomplete response retains the link for retry (${JSON.stringify(response)})`, async () => {
+    const path = root + '/incomplete.pdf', responses = new Map([[fileURL(path), response]]);
+    const h = createHarness(responses);
+    try {
+      await importJSON(h, { root, files: [entry(path)] }); await h.click('download');
+      const data = await exportedJSON(h, 'export');
+      assert.deepEqual(data.files.map(f => f.path), [path]);
+      assert.equal(data.errors[0].excluded, undefined);
+      assert.match(data.errors[0].error, /не полностью/);
+      responses.set(fileURL(path), { body: '%PDF-1.7\nrecovered' }); await h.click('retry');
+      assert.equal(h.calls.length, 2);
+      assert.equal(h.destination.dirs.get(root).files.get('incomplete.pdf').data.toString(), '%PDF-1.7\nrecovered');
+    } finally { h.dom.window.close(); }
+  });
+}
+
+test('empty replacement removes only the remote link and preserves the existing local file', async () => {
+  const destination = new MemoryDir(), out = await destination.getDirectoryHandle(root, { create: true });
+  const path = root + '/first.pdf'; out.files.set('first.pdf', new MemoryFile('original'));
+  const h = createHarness(new Map([[fileURL(path), { body: '' }]]), destination);
+  try {
+    await importJSON(h, { root, files: [entry(path)] }); await h.click('verify');
+    toggle(h, 'reportRows', path, true); await h.click('replaceSelected');
+    assert.deepEqual((await exportedJSON(h, 'export')).files, []);
+    assert.equal(out.files.get('first.pdf').data.toString(), 'original');
+    assert.equal(out.files.has('.noty-download-state.json'), false);
+  } finally { h.dom.window.close(); }
 });
 
 test('mode switching: running auto -> manual -> auto drains excess jobs and never duplicates a file', async () => {
