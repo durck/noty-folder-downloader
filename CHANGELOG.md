@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### 3.2.3
+
+- Show the scan pool's actual active jobs and limit instead of download settings,
+  with explanations for launch pacing, a narrow discovery queue and recovery.
+- Preserve the selected scan worker count across rate limiting. Automatic
+  recovery probes one directory, then restores the configured limit on success.
+- Batch full-manifest volume rendering during scans instead of recalculating
+  after every folder; keep request pacing and final totals intact.
+- Add simulations for wide trees, narrow chains and fast rate-limited listings,
+  plus integration checks for five-slot refill, recovery and batched rendering.
+
 ### 3.2.2
 
 - Remove successfully received empty remote files from the manifest, cache and

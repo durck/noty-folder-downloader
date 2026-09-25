@@ -1,6 +1,6 @@
 {
   "name": "noty-folder-downloader",
-  "version": "3.2.2",
+  "version": "3.2.3",
   "private": true,
   "license": "MIT",
   "repository": {
@@ -9,7 +9,7 @@
   },
   "description": "Folder-preserving userscript for the public music archive",
   "scripts": {
-    "test": "node --test tests/test.cjs tests/autotune.test.cjs tests/autotune-simulation.test.cjs",
+    "test": "node --test tests/test.cjs tests/autotune.test.cjs tests/autotune-simulation.test.cjs tests/scan-simulation.test.cjs",
     "check": "node --check noty-folder-downloader.user.js",
     "test:browser": "node tests/browser-smoke.cjs",
     "test:ui": "node tests/ui-smoke.cjs"

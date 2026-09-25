@@ -1365,16 +1365,72 @@ for (const [threads, failure] of [[3, 'challenge'], [4, 'network'], [4, '429']])
     } finally { releases.splice(0).forEach(release => release()); h.dom.window.close(); }
   });
 }
-test('integration: scan rate limiting lowers its own cap and checkpoints the failed folder', async () => {
+test('integration: scan rate limiting preserves the user limit and checkpoints the failed folder', async () => {
   const responses = new Map([[directoryURL(root), { body: 'slow down', status: 429 }]]);
   const h = createHarness(responses, new MemoryDir(), directoryURL(root), { settings: { scanThreads: 6 } });
-  await h.click('scan');
-  assert.equal(h.panel.getElementById('scanThreads').value, '3');
-  assert.equal(h.panel.getElementById('scan').disabled, true);
-  const data = await core.cacheRequest(h.dom.window.indexedDB, root);
-  assert.deepEqual(data.pending, [root]); assert.equal(data.scanned, false);
-  assert.equal(data.files.length, 0);
-  h.dom.window.close();
+  try {
+    await h.click('scan');
+    assert.equal(h.panel.getElementById('scanThreads').value, '6');
+    assert.equal(JSON.parse(h.dom.window.localStorage.getItem('noty-folder-settings-v1')).scanThreads, 6);
+    assert.equal(h.panel.getElementById('scan').disabled, true);
+    const data = await core.cacheRequest(h.dom.window.indexedDB, root);
+    assert.deepEqual(data.pending, [root]); assert.equal(data.scanned, false);
+    assert.equal(data.files.length, 0);
+  } finally { h.dom.window.close(); }
+});
+
+test('folder scan shows its actual five requests and refills slots as children are discovered', async () => {
+  const children = Array.from({ length: 7 }, (_, i) => root + `/child-${i}`), releases = new Map();
+  const responses = new Map([[directoryURL(root), { body: listing(children.map(directoryURL)) }]]);
+  for (const child of children) responses.set(directoryURL(child), () => new Promise(resolve => releases.set(child, () => resolve(new Response(listing([]))))));
+  const h = createHarness(responses, new MemoryDir(), directoryURL(root), { settings: { scanThreads: 5 } });
+  let run;
+  try {
+    run = h.click('scan'); await until(() => releases.size === 5);
+    assert.equal(h.panel.getElementById('metricActive').textContent, '5 / 5');
+    assert.match(h.panel.getElementById('tuningSummary').textContent, /Сбор папок/);
+    releases.get(children[0])(); await until(() => releases.has(children[5]));
+    assert.equal(h.calls.length, 7);
+    await h.click('pause'); releases.forEach(release => release()); await run;
+    assert.equal(h.panel.getElementById('metricActive').textContent, '0 / 5');
+    assert.equal(h.calls.includes(directoryURL(children[6])), false);
+  } finally { await h.click('pause'); releases.forEach(release => release()); if (run) await run; h.dom.window.close(); }
+});
+
+test('scan recovery checks one directory then restores all five requested slots', async () => {
+  const clock = recoveryClock(), releases = new Map(), children = Array.from({ length: 6 }, (_, i) => root + `/recovered-${i}`);
+  const responses = new Map([[directoryURL(root), { status: 429, body: 'slow down' }]]);
+  const h = createHarness(responses, new MemoryDir(), directoryURL(root), { recoveryClock: clock, settings: { scanThreads: 5 } });
+  try {
+    await h.click('scan');
+    assert.equal(h.panel.getElementById('scanThreads').value, '5');
+    responses.set(directoryURL(root), () => new Promise(resolve => releases.set(root, () => resolve(new Response(listing(children.map(directoryURL)))))));
+    for (const child of children) responses.set(directoryURL(child), () => new Promise(resolve => releases.set(child, () => resolve(new Response(listing([]))))));
+    await clock.advance(30000); clock.ready(h);
+    await until(() => releases.has(root));
+    assert.equal(h.panel.getElementById('metricActive').textContent, '1 / 1');
+    releases.get(root)(); await until(() => releases.size >= 6);
+    assert.equal(h.panel.getElementById('metricActive').textContent, '5 / 5');
+    await h.click('pause'); releases.forEach(release => release());
+    await until(() => !h.panel.getElementById('export').disabled);
+    assert.equal(JSON.parse(h.dom.window.localStorage.getItem('noty-folder-settings-v1')).scanThreads, 5);
+  } finally { await h.click('pause'); releases.forEach(release => release()); h.dom.window.close(); }
+});
+
+test('fast folder completions batch volume rendering and still publish the final count', async () => {
+  const folders = Array.from({ length: 50 }, (_, i) => root + `/fast-${i}`);
+  const responses = new Map([[directoryURL(root), { body: listing(folders.map(directoryURL)) }]]);
+  for (const folder of folders) responses.set(directoryURL(folder), { body: listing([fileURL(folder + '/score.pdf')]) });
+  const h = createHarness(responses, new MemoryDir(), directoryURL(root), { clock: { now: 0 }, settings: { scanThreads: 5 } });
+  let renders = 0;
+  const observer = new h.dom.window.MutationObserver(records => { renders += records.length; });
+  observer.observe(h.panel.getElementById('volume'), { childList: true, characterData: true, subtree: true });
+  try {
+    await h.click('scan'); await turn();
+    assert.match(h.panel.getElementById('status').textContent, /50 файлов в 51 папках/);
+    assert.match(h.panel.getElementById('volume').textContent, /50 файлов/);
+    assert.ok(renders <= 8, `Volume was rerendered ${renders} times within one sampling interval`);
+  } finally { observer.disconnect(); h.dom.window.close(); }
 });
 test('integration: changing settings updates the live UI and persists valid limits', async () => {
   const h = createHarness(fixtures());

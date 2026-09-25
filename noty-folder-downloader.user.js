@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Noty: скачать папку целиком
 // @namespace    local.noty-folder-downloader
-// @version      3.2.2
+// @version      3.2.3
 // @license      MIT
 // @homepageURL  https://github.com/durck/noty-folder-downloader
 // @supportURL   https://github.com/durck/noty-folder-downloader/issues
@@ -954,11 +954,12 @@
       <label for="windowSeconds">Окно измерения, с</label><input id="windowSeconds" type="number" min="5" max="60">
       <label for="gainPercent">Минимальный прирост, %</label><input id="gainPercent" type="number" min="3" max="30">
       <label for="scanThreads">Потоков сбора папок</label><input id="scanThreads" type="number" min="1" max="6">
-      <label for="scanDelayMs">Между запросами папок, мс</label><input id="scanDelayMs" type="number" min="0" max="5000" step="50">
+      <label for="scanDelayMs">Между запросами папок, мс</label><input id="scanDelayMs" type="number" min="0" max="5000" step="50" aria-describedby="scanPacingHint">
       <label for="maxRetries">Автоповторов при сбое</label><input id="maxRetries" type="number" min="0" max="8">
       <label for="retryBaseSeconds">Начальная задержка повтора, с</label><input id="retryBaseSeconds" type="number" min="1" max="60">
     </div><label><input id="autoRecover" type="checkbox" checked> Автоматически продолжать после Cloudflare / HTTP 403 / 429 / 503</label>
     <small>До 8 попыток за запуск с ожиданием 30–300 с; более долгий Retry-After соблюдается. «Пауза» отменяет автоматическое продолжение. Проверку с кликом нужно пройти самостоятельно.</small>
+    <small id="scanPacingHint">Потоки сбора — максимум одновременных запросов. Интервал между запросами общий: 200 мс — до 5 запусков/с. При быстрых ответах или малом числе найденных папок часть потоков свободна.</small>
     <small>Автотюн учитывает байты и сохранённые файлы, проверяет результат возвратом к прежнему лимиту. Работает и в фоновой вкладке. При смене режима начатые файлы докачаются.</small></details>
     <button id="scan" class="primary">1. Найти файлы</button><button id="download" class="primary" disabled>2. Выбрать папку и скачать</button>
     <button id="pause" disabled>Пауза</button><button id="retry" disabled>Повторить ошибки</button><button id="export" disabled>Список ссылок</button>
@@ -1052,7 +1053,25 @@
   }
   fillSettings();
   function targetThreads() { return state.recovering ? 1 : settings.auto ? tuner.limit : settings.threads; }
+  function scanTargetThreads() { return state.recovering ? 1 : settings.scanThreads; }
   function showSpeed(refreshVolume = true) {
+    if (state.phase === 'scan') {
+      const limit = scanTargetThreads();
+      let reason = state.pause ? 'пауза' : !state.busy ? 'сбор остановлен' :
+        state.recovering ? 'проверка доступа одним запросом' :
+        state.retrying.size ? 'ожидаю повторов после сбоя' :
+        state.active >= limit ? 'все доступные потоки заняты' :
+        !state.folders.length ? 'ожидаю обнаружения вложенных папок' :
+        settings.scanDelayMs > 0 ? 'новые запросы запускаются с заданным интервалом' : 'заполняю свободные потоки';
+      if (state.scanned) reason = 'сбор завершён';
+      $('speed').textContent = `Сбор папок · Активно: ${state.active} · Лимит: ${limit}\n` +
+        `Интервал запуска: ${settings.scanDelayMs} мс · ${reason}`;
+      for (const id of ['metricCurrent', 'metricAverage', 'metricFiles']) $(id).textContent = '—';
+      $('metricActive').textContent = `${state.active} / ${limit}`;
+      $('tuningSummary').textContent = `Сбор папок · ${reason}. Интервал между запросами: ${settings.scanDelayMs} мс.`;
+      if (refreshVolume) showVolume();
+      return;
+    }
     const best = tuner.best.rate > 0 || tuner.best.fileRate > 0 ? `${tuner.best.threads} поток(а), ` +
       (tuner.best.metric === 'files' ? `${tuner.best.fileRate.toFixed(2)} файлов/с` : formatRate(tuner.best.rate)) : 'ещё измеряется';
     const phases = { baseline: 'замер', probe: 'проба лимита', confirm: 'контрольный замер', hold: 'удержание' };
@@ -1659,8 +1678,9 @@
     if (!automatic) manualRun();
     state.manifestLoaded = true;
     state.busy = true; state.pause = false; state.phase = 'scan'; state.stopReason = ''; controls();
+    let volumeAt = -Infinity;
     try {
-      await runPool({ queue: state.folders, limit: () => state.recovering ? 1 : settings.scanThreads, paused: () => state.pause,
+      await runPool({ queue: state.folders, limit: scanTargetThreads, paused: () => state.pause,
         delayMs: () => settings.scanDelayMs,
         worker: path => retryOperation(path, async () => {
           state.inFlightFolders.add(path);
@@ -1682,13 +1702,20 @@
           }
           state.visited.add(path);
         }),
-        complete: path => { finishRecovery(); state.inFlightFolders.delete(path); state.listGeneratedAt = new Date().toISOString(); showVolume(); scheduleCache(); },
+        complete: path => { finishRecovery(); state.inFlightFolders.delete(path); state.listGeneratedAt = new Date().toISOString(); scheduleCache(); },
         failed: (e, path) => {
           state.inFlightFolders.delete(path); state.folders.unshift(path); state.pause = true;
           if (!e.pausedRetry) { state.stopReason ||= e.message; log(path + ': ' + e.message); }
           if (!e.pausedRetry) queueRecovery(e);
         },
-        tick: (active, queued) => say(state.stopReason || `${state.pause ? 'Пауза: завершаю запросы' : 'Собираю папки'}…\nПапок: ${state.visited.size}; файлов: ${state.files.size}; запросов: ${active}; в очереди: ${queued}; ждут повтора: ${state.retrying.size}.`)
+        tick: (active, queued) => {
+          state.active = active;
+          const now = performance.now(), refreshVolume = now - volumeAt >= 500;
+          if (refreshVolume) volumeAt = now;
+          // Volume walks the whole manifest; do not repeat it for every page.
+          showSpeed(refreshVolume);
+          say(state.stopReason || `${state.pause ? 'Пауза: завершаю запросы' : 'Собираю папки'}…\nПапок: ${state.visited.size}; файлов: ${state.files.size}; запросов: ${active} / ${scanTargetThreads()}; в очереди: ${queued}; ждут повтора: ${state.retrying.size}.`);
+        }
       });
       if (!state.folders.length) {
         checkCollisions([...state.files.values()], root);
@@ -1697,15 +1724,16 @@
         say(`Найдено ${state.files.size} файлов в ${state.visited.size} папках.\nВыбери папку на компьютере для скачивания.`);
       } else say((state.stopReason ? state.stopReason + '\n' : '') + `Поиск на паузе. Найдено ${state.files.size} файлов. Нажми «Найти файлы», чтобы продолжить.`);
     } catch (e) { say(e.message); log(e.message); }
-    finally { await saveCache(); state.busy = false; refreshSelection(); }
+    finally { await saveCache(); state.busy = false; state.active = 0; refreshSelection(); showSpeed(false); }
   }
 
   function beginCooldown(error) {
     state.cooldownUntil = Math.max(state.cooldownUntil, Date.now() + error.retryMs);
-    if (state.phase === 'scan') settings.scanThreads = Math.max(1, Math.floor(settings.scanThreads / 2));
     // Recovery temporarily caps downloads through targetThreads(). Preserve
     // the user's manual preference so successful recovery restores it.
-    else if (settings.auto) tuner.penalize(performance.now());
+    // Scans likewise use one probe through scanTargetThreads(), not a permanent
+    // edit to the user's saved scan limit.
+    if (state.phase !== 'scan' && settings.auto) tuner.penalize(performance.now());
     fillSettings();
     try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch { /* Optional persistence. */ }
     if (!state.ticker) state.ticker = setInterval(() => {

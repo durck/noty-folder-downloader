@@ -285,6 +285,20 @@ not performance promises for the live archive.
 Folder discovery uses its own fixed, adjustable pool and delay, without speed
 autotuning. Newly discovered subfolders enter the queue once. A narrow directory
 chain cannot use multiple requests until independent child folders are known.
+The worker count is a maximum, not a target occupancy. The scan delay applies
+globally: 200 ms permits up to five starts per second. If each response takes
+100-300 ms, only one or two requests may be in flight even with five slots.
+Reducing the delay allows more starts when a wide queue is available; it also
+increases request pressure and can trigger more server rate limiting. Zero
+disables launch pacing while still respecting the worker limit.
+
+Since 3.2.3, **Активно / лимит** displays scan jobs during discovery, and the
+summary explains pacing, waiting for discovered children, or recovery. Scan
+recovery no longer changes the saved worker preference: it tests one directory
+and restores the configured limit after success. If an older version already
+saved a reduced limit, set **Потоков сбора папок** to the desired value again.
+Full-list volume updates are batched at 500 ms intervals with a final refresh,
+avoiding a complete manifest traversal after every fast folder response.
 
 ## File sizes and remaining time
 
