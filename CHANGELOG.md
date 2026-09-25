@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### 3.2.1
+
+- Keep a common tuning metric through each baseline/trial/confirmation so
+  completion-count thresholds do not reject genuine small-file scaling.
+- Restore the accepted worker count before invalidating a trial on retries,
+  failures or resume; preserve the user's manual preference.
+- Normalize fractional-rate noise correctly and gather up to six windows for
+  sparse small-file completions, using their aggregate rate.
+- Continue downward exploration after a confirmed reduction and back off
+  unsuccessful probes, with a five-minute maximum hold.
+- Add regressions for sparse completions, production error callbacks, downward
+  trials, plateau overhead and mixed-size queues. In deterministic 300-file
+  latency scenarios, completion time improves from 585.3 to 357.9 seconds and
+  from 2233.413 to 1442.408 seconds; these are simulations, not live-site claims.
+
 ### 3.2.0
 
 - Replace byte-only hill climbing with bounded, workload-aware probes and a

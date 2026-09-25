@@ -185,3 +185,80 @@ test('one contaminated window cannot promote a slower worker level', () => {
   d.run(40, n => n === 1 ? 1 : d.tuner.windows.length === 1 ? 20 : 0.5);
   assert.equal(d.tuner.best.threads, 1);
 });
+
+test('regression: fractional completion rates receive relative noise protection', () => {
+  const d = driver({ windowSeconds: 20 });
+  const completions = new Set([5, 10, 15, 20, 24, 26, 28, 30, 32, 34, 36, 38]);
+  for (let second = 1; second <= 42; second++) {
+    const files = Number(completions.has(second));
+    d.step(files / 1024, { files, smallFiles: files, completedBytes: files * 1024 });
+  }
+  assert.equal(d.decisions.length, 0, '0.2 vs 0.4 files/s needs a third window');
+});
+
+test('regression: flat capacity descends from a high manual seed to one worker', () => {
+  const d = driver({ threads: 6, maxThreads: 6, auto: false }, 6);
+  d.tuner.updateSettings({ ...d.tuner.settings, auto: true }, d.now);
+  d.run(600, 1);
+  assert.equal(d.tuner.best.threads, 1);
+  assert.equal(d.tuner.settings.threads, 6, 'Learning must not overwrite manual preference');
+});
+
+test('regression: production retries cannot adopt an unconfirmed worker increase', () => {
+  const source = require('node:fs').readFileSync(require.resolve('../noty-folder-downloader.user.js'), 'utf8').replaceAll('\r\n', '\n');
+  const match = source.match(/onRetry: \(error, attempt, delay\) => \{([\s\S]*?)\n      \},\n      onWaitEnd:/);
+  assert.ok(match, 'Use the actual production retry callback');
+  const retry = new Function('state', 'tuner', 'performance', 'log', 'settings', 'error', 'attempt', 'delay', 'path', 'showVolume', match[1]);
+  const d = driver({ maxThreads: 6 });
+  const state = { loadedBytes: new Map(), retryEpoch: 0, retrying: new Map(), jobs: new Map() };
+  let retries = 0;
+  for (let i = 0; i < 180; i++) {
+    d.step(1);
+    if (d.tuner.phase === 'probe' && d.tuner.limit > d.tuner.probe.base.threads) {
+      const accepted = d.tuner.probe.base.threads;
+      retry(state, d.tuner, { now: () => d.now }, () => {}, d.tuner.settings, new Error('fixture'), 1, 2000, 'file.pdf', () => {});
+      assert.equal(d.tuner.limit, accepted, 'Rollback must happen before the next scheduler tick');
+      d.step(0, { reason: 'retry' }, false); retries++;
+    }
+  }
+  assert.ok(retries > 2);
+  assert.equal(d.tuner.best.threads, 1);
+});
+
+test('production failure invalidates both an upward trial and its baseline confirmation', async () => {
+  const source = require('node:fs').readFileSync(require.resolve('../noty-folder-downloader.user.js'), 'utf8').replaceAll('\r\n', '\n');
+  const match = source.match(/failed: async \(e, item\) => \{([\s\S]*?)\n        \},\n        tick:/);
+  assert.ok(match, 'Use the actual download failure callback');
+  const fail = new Function('state', 'tuner', 'performance', 'finishJob', 'log', 'e', 'item', `return (async () => {${match[1]}})()`);
+  for (const phase of ['probe', 'confirm']) {
+    const d = driver({ maxThreads: 2 });
+    for (let i = 0; i < 100 && d.tuner.phase !== phase; i++) d.step(d.tuner.limit);
+    assert.equal(d.tuner.phase, phase);
+    const state = { loadedBytes: new Map(), errors: [] };
+    await fail(state, d.tuner, { now: () => d.now }, () => {}, () => {}, new Error('HTTP 404'), { path: 'file.pdf' });
+    assert.equal(d.tuner.limit, 1);
+    assert.equal(d.tuner.probe, null);
+    assert.equal(state.errors.length, 1);
+  }
+});
+
+test('interrupted downward trial returns to the accepted level, explicit recovery then reduces it', () => {
+  const d = driver({ threads: 6, maxThreads: 6 }, 6);
+  for (let i = 0; i < 100 && d.tuner.phase !== 'probe'; i++) d.step(1);
+  assert.equal(d.tuner.limit, 5);
+  d.tuner.suspend('retry', d.now);
+  assert.equal(d.tuner.limit, 6);
+  d.tuner.penalize(d.now);
+  assert.equal(d.tuner.limit, 3);
+  assert.equal(d.tuner.settings.threads, 6);
+});
+
+test('repeated plateau probes back off while retaining bounded exploration', () => {
+  const d = driver({ maxThreads: 2 }); d.run(1800, 1);
+  const probes = d.decisions.filter(x => x.phase === 'probe');
+  assert.ok(probes.length >= 4 && probes.length < 14, `Unexpected probe count: ${probes.length}`);
+  const intervals = probes.slice(1).map((p, i) => p.second - probes[i].second);
+  assert.ok(intervals.at(-1) > intervals[0]);
+  assert.ok(Math.max(...intervals) <= 340, 'Exploration must still resume after the bounded hold');
+  assert.equal(d.tuner.best.threads, 1);
+});

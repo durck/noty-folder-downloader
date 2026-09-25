@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Noty: скачать папку целиком
 // @namespace    local.noty-folder-downloader
-// @version      3.2.0
+// @version      3.2.1
 // @license      MIT
 // @homepageURL  https://github.com/durck/noty-folder-downloader
 // @supportURL   https://github.com/durck/noty-folder-downloader/issues
@@ -234,11 +234,17 @@
       this.warmUntil = now + Math.min(2000, this.settings.windowSeconds * 500);
     }
     resetWindow(now) {
-      // A pause, error or new run invalidates comparisons, not the chosen limit.
+      // Explicit settings/recovery changes may deliberately choose a new limit.
       this.phase = 'baseline'; this.probe = null; this.reference = null;
+      this.direction = 1; this.rejectedProbes = 0;
       this.best = { threads: this.limit, rate: 0, fileRate: 0, metric: 'bytes' };
       this.reason = 'measuring'; this.holdUntil = now;
       this.clearWindow(now);
+    }
+    invalidate(now) {
+      // Discard experimental evidence only after restoring the accepted limit.
+      if (this.probe) this.limit = this.probe.base.threads;
+      this.resetWindow(now);
     }
     updateSettings(input, now) {
       const before = this.settings, next = normalizeSettings(input);
@@ -248,10 +254,12 @@
         this.limit = Math.min(next.maxThreads, next.auto ? next.threads : this.best.threads || this.limit);
         this.resetWindow(now); this.reason = next.auto ? 'measuring' : 'manual';
       } else if (['maxThreads', 'windowSeconds', 'gainPercent', 'delayMs'].some(key => before[key] !== next[key])) {
+        this.invalidate(now);
         this.limit = Math.min(this.limit, next.maxThreads); this.resetWindow(now);
       }
     }
     penalize(now) {
+      this.invalidate(now);
       this.limit = Math.max(1, Math.floor(this.limit / 2));
       this.resetWindow(now); this.reason = 'recovery';
     }
@@ -262,8 +270,7 @@
           this.clearWindow(now); this.reason = reason; return;
         }
         // Do not keep an unconfirmed increase across a contaminated interval.
-        if (this.probe) this.limit = this.probe.base.threads;
-        this.resetWindow(now); this.reason = reason;
+        this.invalidate(now); this.reason = reason;
       }
     }
     move(limit, phase, now) {
@@ -272,7 +279,10 @@
     }
     hold(sample, now, reason = 'stable') {
       this.best = sample; this.probe = null; this.reference = sample;
-      this.holdUntil = now + Math.max(30000, this.settings.windowSeconds * 4000);
+      this.direction = 1;
+      if (['plateau', 'pacing', 'unconfirmed'].includes(reason)) this.rejectedProbes++;
+      this.holdUntil = now + Math.min(300000,
+        Math.max(30000, this.settings.windowSeconds * 4000) * 2 ** Math.min(3, this.rejectedProbes));
       this.move(sample.threads, 'hold', now); this.reason = reason;
     }
     startProbe(sample, next, now) {
@@ -302,9 +312,15 @@
         for (const key of ['ms', 'bytes', 'files', 'completedBytes', 'smallFiles', 'activeMs']) a[key] += f[key];
         a.largeActive ||= f.largeActive; return a;
       }, { ms: 0, bytes: 0, files: 0, completedBytes: 0, smallFiles: 0, activeMs: 0, largeActive: false });
+      const smallOnly = total.smallFiles === total.files && !total.largeActive;
+      // Freeze the score through A/B/A. Concurrency changes sample counts;
+      // crossing five completions does not by itself change the workload.
+      const reference = this.probe?.base || (this.phase === 'hold' ? this.best : null);
+      const metric = reference ? (reference.metric === 'files' && smallOnly ? 'files' : 'bytes') :
+        total.files >= 5 && smallOnly ? 'files' : 'bytes';
       return { ...total, threads: this.limit, rate: total.bytes * 1000 / total.ms,
         fileRate: total.files * 1000 / total.ms, meanSize: total.files ? total.completedBytes / total.files : 0,
-        metric: total.files >= 5 && total.smallFiles === total.files && !total.largeActive ? 'files' : 'bytes',
+        metric,
         utilization: total.activeMs / total.ms / this.limit };
     }
     observe(bytes, elapsedMs, eligible, now, work = {}) {
@@ -331,20 +347,27 @@
       this.windows.push(window); this.frames = [];
       if (this.windows.length < 2) return null;
       const sample = this.summarize(this.windows);
+      // Sparse completions are quantized, not throughput spikes. Gather more
+      // events (bounded in time) and retain their aggregate rate, not a median
+      // that can erase a whole completion from a short measurement window.
+      const sparse = sample.files > 0 && sample.smallFiles === sample.files && !sample.largeActive && sample.fileRate < 1;
+      if (sparse && sample.files < 8 && sample.ms < this.settings.windowSeconds * 6000) return null;
       const value = w => sample.metric === 'files' ? w.fileRate : w.rate;
       const scores = this.windows.map(value);
-      const spread = (Math.max(...scores) - Math.min(...scores)) / Math.max(1, ...scores);
+      const peak = Math.max(...scores);
+      const spread = peak > 0 ? (peak - Math.min(...scores)) / peak : 0;
       // A third window handles bursty reads; a probe never waits forever for quiet.
       if (spread > 0.25 && this.windows.length < 3) return null;
-      if (this.windows.length === 3) {
-        const median = [...this.windows].sort((a, b) => value(a) - value(b))[1];
+      if (this.windows.length >= 3 && !sparse) {
+        const median = [...this.windows].sort((a, b) => value(a) - value(b))[Math.floor(this.windows.length / 2)];
         sample.rate = median.rate; sample.fileRate = median.fileRate;
       }
       sample.noise = Math.min(0.3, spread / 2); this.windows = [];
       const old = this.limit;
       if (this.phase === 'baseline') {
         this.best = sample;
-        if (this.score(sample) > 0 && this.limit < this.settings.maxThreads) this.startProbe(sample, this.limit + 1, now);
+        const next = this.limit + this.direction;
+        if (this.score(sample) > 0 && next >= 1 && next <= this.settings.maxThreads) this.startProbe(sample, next, now);
         else this.hold(sample, now, this.score(sample) > 0 ? 'ceiling' : 'no-progress');
       } else if (this.phase === 'probe') {
         const base = this.probe.base;
@@ -358,6 +381,8 @@
       } else if (this.phase === 'confirm') {
         const candidate = this.probe.candidate;
         if (this.acceptable(candidate, sample)) {
+          this.direction = Math.sign(candidate.threads - sample.threads);
+          this.rejectedProbes = 0;
           this.best = candidate; this.probe = null;
           this.move(candidate.threads, 'baseline', now);
         } else this.hold(sample, now, 'unconfirmed');
@@ -370,8 +395,10 @@
         else if (degraded && this.limit > 1 && this.score(sample) > 0) this.startProbe(sample, this.limit - 1, now);
         else if (now >= this.holdUntil && this.score(sample) > 0) {
           // Occasionally look beyond a local one-step plateau, within the same cap.
-          const step = ++this.explorations % 2 === 0 ? 2 : 1;
-          const next = this.limit < this.settings.maxThreads ? Math.min(this.settings.maxThreads, this.limit + step) : Math.max(1, this.limit - 1);
+          const cycle = ++this.explorations % 3;
+          const step = cycle === 2 ? 2 : 1;
+          const lower = this.limit > 1 && (cycle === 0 || this.limit === this.settings.maxThreads);
+          const next = lower ? this.limit - 1 : Math.min(this.settings.maxThreads, this.limit + step);
           if (next !== this.limit) this.startProbe(sample, next, now);
           else this.hold(sample, now, 'ceiling');
         }
@@ -1572,7 +1599,7 @@
     try { return await withRetries(operation, { settings: () => settings, paused: () => state.pause,
       onRetry: (error, attempt, delay) => {
         state.loadedBytes.delete(path); state.etaRate = 0; state.retryEpoch++;
-        tuner.resetWindow(performance.now());
+        tuner.invalidate(performance.now());
         state.retrying.set(path, performance.now() + delay);
         if (state.jobs.has(path)) state.jobs.get(path).stage = 'retry';
         log(`${path || 'Root'}: ${error.message}. Автоповтор ${attempt}/${settings.maxRetries} через ${(delay / 1000).toFixed(1)} с.`);
@@ -1863,7 +1890,7 @@
     state.busy = true; state.pause = false; state.phase = 'download'; controls();
     state.stopReason = ''; state.rate = 0; state.etaRate = 0; state.fileRate = 0; state.completionSamples = [];
     let speedMeter = new SpeedMeter(), fileMeter = new SpeedMeter(), retryEpoch = state.retryEpoch;
-    tuner.resetWindow(performance.now());
+    tuner.invalidate(performance.now());
     let lastTime = performance.now(), lastBytes = state.received, lastFiles = state.transferredFiles;
     let lastSavedBytes = state.transferredBytes, lastSmall = state.transferredSmall;
     try {
@@ -1892,7 +1919,7 @@
           finishJob(item.path, e.pausedRetry ? 'paused' : 'error');
           if (e.pausedRetry) { state.queue.unshift(item); return; }
           log(item.path + ': ' + e.message);
-          tuner.resetWindow(performance.now());
+          tuner.invalidate(performance.now());
           if (e.stop || ['NotAllowedError', 'QuotaExceededError', 'NotReadableError'].includes(e.name)) {
             state.pause = true; state.queue.unshift(item);
             if (!state.stopReason) state.stopReason = e.message;

@@ -199,12 +199,16 @@ already-started work finish before more work starts.
 | Automatic retries after a transient failure | 3 | 0–8 |
 | Initial retry delay | 2 s | 1–60 s |
 
-### Autotuner 3.2.0
+### Autotuner 3.2.1
 
 A fresh automatic session starts with one worker. It measures two windows after
 up to two seconds of warm-up; bursty measurements get a third window and a
 median rate. At the defaults, one measurement normally takes 22-32 seconds.
 Partially occupied workers no longer discard all accumulated measurements.
+For sparse small-file completions (below one file/s), it gathers at least
+eight completions or up to six windows, whichever comes first, and uses the
+aggregate rate. This avoids treating individual completion events as isolated
+speed spikes. Relative-noise protection also applies below one file/s.
 
 For completed small files (at least five completions, all at most 256 KiB, and
 no large or unknown-size active files), tuning uses successful saved files/s.
@@ -215,16 +219,22 @@ multiplied into a synthetic speed.
 
 A promising new worker count must also beat a fresh measurement at the old
 count: baseline A, trial B, return to A. This reduces accidental attribution of
-server/workload changes to concurrency. A change in metric or a completed mean
-file-size ratio outside 0.5-2 invalidates a comparison. The configured gain
+server/workload changes to concurrency. The metric stays fixed throughout the
+comparison and subsequent hold; crossing a completion-count threshold alone
+does not change it. A small-file sample becoming mixed/large, or a completed
+mean file-size ratio outside 0.5-2, invalidates a comparison. The configured gain
 threshold and observed noise determine acceptance. Lower counts may be retained
 within a maximum eight-percent tolerance to avoid needless concurrent requests.
 
-Hold periods last at least 30 seconds (40 at default settings). The reference
+Hold periods start at 30 seconds (40 at default settings). Unsuccessful probes
+progressively lengthen the hold, capped at five minutes; a confirmed change
+resets this backoff. The reference
 keeps updating, including at one worker after a persistent slowdown. Bounded
 periodic exploration can test two extra workers to look past a local plateau;
-all probes obey the configured maximum. At the ceiling, occasional lower-count
-probes check whether fewer workers can do the same work. These probes and their
+all probes obey the configured maximum. Occasional lower-count probes check
+whether fewer workers can do the same work, including below the ceiling.
+After a confirmed reduction, the next experiment checks the next lower count
+until a reduction stops helping or one worker remains. These probes and their
 confirmation temporarily change the live worker limit by design.
 
 Tuning also works in hidden tabs while timer observations remain usable. A gap
@@ -233,6 +243,9 @@ prevented. Pause, retry waits, access recovery and the end of the queue suspend
 tuning with an explicit status. A drain after lowering the limit preserves the
 pending comparison until the excess jobs finish. Underfilled probes still
 finish, even when launch pacing limits useful concurrency.
+Retries and failures immediately roll an unconfirmed trial back to its accepted
+worker count before discarding measurements. Access recovery may then reduce
+that accepted automatic count further; manual settings remain unchanged.
 
 ### Switching modes while running
 
