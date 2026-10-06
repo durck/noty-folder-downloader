@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Noty: скачать папку целиком
 // @namespace    local.noty-folder-downloader
-// @version      3.2.3
+// @version      3.2.4
 // @license      MIT
 // @homepageURL  https://github.com/durck/noty-folder-downloader
 // @supportURL   https://github.com/durck/noty-folder-downloader/issues
@@ -42,12 +42,6 @@
   function macMetadataPath(path) {
     const name = path.split('/').at(-1);
     return name === '.DS_Store' || (name.startsWith('._') && name.length > 2);
-  }
-  function htmlRecoveryTarget(url) {
-    try {
-      const parsed = new URL(url);
-      return parsed.origin === ORIGIN && parsed.pathname.startsWith('/Public/') && htmlDocumentPath(parsed.pathname) ? parsed.href : null;
-    } catch { return null; }
   }
   function challengeError(delay = 30000, url = '', evidence = 'признаки страницы проверки в HTML') {
     return Object.assign(new Error('Cloudflare: сайт запросил проверку браузера. Если ожидание не помогает, открой ссылку «Открыть сайт для проверки» и пройди проверку в том же браузере.'),
@@ -781,19 +775,16 @@
         try {
           const target = new URL(data.target);
           if (target.origin !== ORIGIN || target.username || target.password || target.hash) return;
-          if (target.pathname === '/') {
-            currentRoot(target.href);
-            if ([...target.searchParams.keys()].some(key => key !== 'dir')) return;
-          } else if (!htmlRecoveryTarget(target.href) || !classifyLink(target.href, folderURL(''), '', '')) return;
+          if (target.pathname !== '/') return;
+          currentRoot(target.href);
+          if ([...target.searchParams.keys()].some(key => key !== 'dir')) return;
           helperContext = { ...helperContext, revision: data.revision, target: target.href, savedAt: Date.now() };
           const context = JSON.stringify(helperContext);
           try { sessionStorage.setItem(helperStorageKey, context); } catch { /* Window name remains a fallback. */ }
           window.name = 'noty-helper:' + context;
-          if (target.pathname === '/') {
-            target.searchParams.set('noty_helper', helperContext.token);
-            target.searchParams.set('noty_channel', helperContext.channel);
-            target.searchParams.set('noty_revision', String(helperContext.revision));
-          }
+          target.searchParams.set('noty_helper', helperContext.token);
+          target.searchParams.set('noty_channel', helperContext.channel);
+          target.searchParams.set('noty_revision', String(helperContext.revision));
           announce('noty-helper-alive', { navigating: true });
           location.replace(target.href);
         } catch { /* Reject invalid navigation messages without changing the queue. */ }
@@ -801,15 +792,13 @@
       announce('noty-helper-alive');
       window.addEventListener('pagehide', () => helperChannel.close(), { once: true });
     }
-    const hasContent = !!document.body?.textContent.trim() || !!document.body?.querySelector('img, audio, video, object');
     const badge = document.createElement('div'); badge.id = 'noty-helper-status'; badge.setAttribute('role', 'status');
     badge.style.cssText = 'position:fixed;bottom:16px;right:16px;z-index:2147483647;max-width:360px;padding:16px;background:white;border:1px solid #bacbd8;border-radius:12px;font:15px/1.5 system-ui;color:#172634';
     badge.textContent = 'Служебная вкладка Noty. Ожидаю полной загрузки страницы проверки. Оставь эту вкладку открытой.';
     document.body.append(badge);
     let notified = false;
     const notifyReady = () => {
-      const target = htmlRecoveryTarget(helperContext.target);
-      const contentReady = target ? location.href === target && hasContent : location.pathname === '/' && directoryReady(document);
+      const contentReady = location.pathname === '/' && directoryReady(document);
       if (!notified && document.readyState === 'complete' && contentReady && !isChallenge(document.documentElement.outerHTML)) {
         notified = true;
         announce('noty-directory-ready');
@@ -821,7 +810,7 @@
     return;
   }
 
-  // Archive HTML is only a recovery surface when this tab has a helper context.
+  // Ordinary archive files never mount the downloader interface.
   if (location.pathname !== '/') return;
   function mountCatalogWorkspace(panelHost) {
     const table = [...document.querySelectorAll('table')].find(candidate => {
@@ -1023,6 +1012,7 @@
     if (root === '') $('status').textContent = 'Будут найдены файлы во всех разделах архива. Сначала собери список файлов.';
   }
   catch (e) { $('status').textContent = e.message; $('scan').disabled = true; return; }
+  const parentCatalogURL = folderURL(root);
   const state = { busy: false, pause: false, phase: '', folders: [root], visited: new Set(), files: new Map(),
     scanned: false, output: null, journal: null, queue: [], errors: [], done: 0, total: 0, logs: [],
     received: 0, active: 0, rate: 0, transferredFiles: 0, transferredBytes: 0, transferredSmall: 0, fileRate: 0, completionSamples: [], cooldownUntil: 0, stopReason: '', preparing: false, ticker: null,
@@ -1452,7 +1442,6 @@
   }
   function manualRun() {
     cancelRecovery(); state.userPaused = false; state.recoveryBlocked = false; state.autoAttempts = 0;
-    state.recoveryTarget = null;
     state.recovering = false; $('recoveryInfo').textContent = '';
   }
   const recoveryChannelName = 'noty-recovery-' + Math.random().toString(36).slice(2);
@@ -1491,7 +1480,7 @@
     try {
       const connected = checkHelperConnection();
       if (connected && !refresh) { try { state.helper.focus(); } catch { /* Isolated helper. */ } return true; }
-      const target = state.recoveryTarget || folderURL(root);
+      const target = parentCatalogURL;
       if (connected && state.helperProtocol && recoveryChannel) {
         state.helperReady = false; state.helperRevision++; state.helperConnectUntil = Date.now() + 30000;
         state.helperPingDeadline = 0;
@@ -1506,10 +1495,8 @@
       state.helperConnectUntil = recoveryChannel ? Date.now() + 30000 : 0;
       state.helperToken = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
       const url = new URL(target);
-      if (!htmlRecoveryTarget(target)) {
-        url.searchParams.set('noty_helper', state.helperToken);
-        url.searchParams.set('noty_channel', recoveryChannelName);
-      }
+      url.searchParams.set('noty_helper', state.helperToken);
+      url.searchParams.set('noty_channel', recoveryChannelName);
       // Seed tab-local state before the first network navigation: a redirect
       // can strip the URL parameters before this userscript ever executes.
       if (!state.helper || state.helper.closed) state.helper = window.open('', '_blank');
@@ -1560,12 +1547,9 @@
   function queueRecovery(error) {
     // File-level plain denials never reach global recovery. Directory access
     // failures and recognized challenges retain the bounded recovery flow.
-    if (error.networkFailure || error.challenge || [403, 429, 503].includes(error.status)) {
-      state.recoveryTarget = htmlRecoveryTarget(error.url) || folderURL(root);
-    }
     if (error.networkFailure || error.challenge || error.status === 403) {
-      $('challengeLink').hidden = false; $('challengeLink').href = state.recoveryTarget;
-      log(`Проверка доступа: ${error.evidence || 'ответ сервера'}. Страница проверки: ${state.recoveryTarget}`);
+      $('challengeLink').hidden = false; $('challengeLink').href = parentCatalogURL;
+      log(`Проверка доступа: ${error.evidence || 'ответ сервера'}. Страница проверки: ${parentCatalogURL}`);
     }
     if (!error.networkFailure && !error.challenge && ![403, 429, 503].includes(error.status)) {
       state.stopReason = error.message; state.recoveryBlocked = true; cancelRecovery(); return;

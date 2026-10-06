@@ -24,7 +24,9 @@ use the File System Access API.
 2. Optionally select folders, filter formats, or edit the collected file list.
 3. Click **2. Выбрать папку и скачать**, choose a destination, and allow writing.
 4. Keep the main tab open. Enable the helper tab for automatic recovery and
-   leave that tab open too. An interactive site check may still need your input.
+   leave that tab open too. The helper always opens the main tab's catalog,
+   including when a download of an HTML file fails or an imported list covers
+   another folder. An interactive site check may still need your input.
 
 The selected archive folder is created inside your destination. On Windows,
 use a short parent path such as `C:\Archive` for deeply nested collections.

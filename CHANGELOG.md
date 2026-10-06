@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### 3.2.4
+
+- Always open and refresh the recovery helper at the main tab catalog, even
+  when the failed download is an HTML file or an imported list has another root.
+- Reject helper navigation commands targeting archive files; retain automatic
+  retry, connection monitoring and the bounded recovery budget.
+- Cover HTML/PHP failures, legacy helper state, imported scopes and browser recovery.
+
 ### 3.2.3
 
 - Show the scan pool's actual active jobs and limit instead of download settings,

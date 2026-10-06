@@ -178,6 +178,7 @@ test('helper channel rejects foreign, stale and non-archive navigation commands'
       { token: 'paired', revision: 3, target: 'https://example.com/' },
       { token: 'paired', revision: 3, target: 'javascript:alert(1)' },
       { token: 'paired', revision: 3, target: fileURL(root + '/download.exe') },
+      { token: 'paired', revision: 3, target: fileURL(root + '/lesson.htm') },
       { token: 'paired', revision: 3, target: origin + '/?dir=../private' }
     ]) bus.emit({ type: 'noty-helper-refresh', ...data });
     assert.equal(bus.sent.length, before);
@@ -204,16 +205,17 @@ test('regression: ordinary HTML with Cloudflare JavaScript Detections downloads 
   } finally { h.dom.window.close(); }
 });
 
-for (const name of ['nnn.htm', 'index(1).php']) test(`regression: blocked ${name} recovery opens the exact file instead of the accessible catalog`, async () => {
+for (const name of ['nnn.htm', 'index(1).php']) test(`regression: blocked ${name} recovery opens the parent catalog instead of the file`, async () => {
   const path = root + '/' + name, clock = recoveryClock();
   const responses = new Map([[fileURL(path), { status: 403, body: challengePage, headers: { 'cf-mitigated': 'challenge' } }]]);
   const h = createHarness(responses, new MemoryDir(), directoryURL(root), { recoveryClock: clock });
   try {
     await importJSON(h, { root, files: [entry(path)] }); await h.click('download');
-    assert.equal(h.panel.getElementById('challengeLink').href, fileURL(path));
+    assert.equal(h.panel.getElementById('challengeLink').href, directoryURL(root));
     await clock.advance(30000);
-    assert.equal(clock.urls.at(-1), fileURL(path));
-    assert.equal(JSON.parse(clock.helper.name.slice(12)).target, fileURL(path));
+    assert.equal(new URL(clock.urls.at(-1)).pathname, '/');
+    assert.equal(new URL(clock.urls.at(-1)).searchParams.get('dir'), root);
+    assert.equal(JSON.parse(clock.helper.name.slice(12)).target, directoryURL(root));
     responses.set(fileURL(path), { body: '<html><body>Music lesson</body></html>' });
     clock.ready(h);
     await until(() => /Готово: 1\/1/.test(h.panel.getElementById('status').textContent));
@@ -222,10 +224,24 @@ for (const name of ['nnn.htm', 'index(1).php']) test(`regression: blocked ${name
   } finally { h.dom.window.close(); }
 });
 
-test('HTML helper waits for its target, full load and real content; ordinary archive pages get no UI', () => {
+test('imported manifest scope does not replace the parent tab catalog for recovery', async () => {
+  const scope = '_OTHER', path = scope + '/lesson.htm', clock = recoveryClock();
+  const h = createHarness(new Map([[fileURL(path), { status: 403, body: challengePage,
+    headers: { 'cf-mitigated': 'challenge' } }]]), new MemoryDir(), directoryURL(root), { recoveryClock: clock });
+  try {
+    await importJSON(h, { root: scope, files: [entry(path)] });
+    await h.click('enableRecovery');
+    assert.equal(JSON.parse(clock.helper.name.slice(12)).target, directoryURL(root));
+    await h.click('download'); await clock.advance(30000);
+    assert.equal(h.panel.getElementById('challengeLink').href, directoryURL(root));
+    assert.equal(new URL(clock.urls.at(-1)).searchParams.get('dir'), root);
+  } finally { h.dom.window.close(); }
+});
+
+test('helper readiness requires a loaded catalog even with legacy HTML context; ordinary archive pages get no UI', () => {
   const target = fileURL(root + '/nnn.htm');
-  for (const [url, content, expected] of [[target, '<html><body>Music lesson</body></html>', 1],
-    [target, challengePage, 0], [target, '<html><body></body></html>', 0], [directoryURL(root), listing([]), 0],
+  for (const [url, content, expected] of [[target, '<html><body>Music lesson</body></html>', 0],
+    [target, challengePage, 0], [target, '<html><body></body></html>', 0], [directoryURL(root), listing([]), 1],
     [fileURL(root + '/other.htm'), '<html><body>Other</body></html>', 0]]) {
     const dom = new JSDOM(content, { url, runScripts: 'outside-only' });
     const messages = []; let readyState = 'interactive';
@@ -252,7 +268,8 @@ test('recovery: repeated readiness cannot create an unbounded blocked-HTML retry
     await importJSON(h, { root, files: [entry(path)] }); await h.click('download');
     for (let i = 0; i < 8; i++) {
       await clock.advance(300000);
-      assert.equal(clock.urls.at(-1), fileURL(path));
+      assert.equal(new URL(clock.urls.at(-1)).pathname, '/');
+      assert.equal(new URL(clock.urls.at(-1)).searchParams.get('dir'), root);
       clock.ready(h);
       await until(() => h.calls.length === i + 2 && /Очередь сохранена/.test(h.panel.getElementById('log').textContent));
       await turn();

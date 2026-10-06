@@ -59,12 +59,7 @@ fs.mkdirSync(artifacts, { recursive: true });
         if (url.pathname.endsWith('/nnn.htm')) {
           if (route.request().isNavigationRequest()) {
             htmlNavigations++;
-            const helperNow = await page.evaluate(() => Date.now());
-            const blocked = htmlNavigations === 1;
-            if (!blocked) htmlAccess = true;
-            const body = blocked ? '<html><head><title>Just a moment...</title><meta name="robots" content="noindex,nofollow"></head><body><h1>Challenge pending</h1></body></html>' : htmlLesson;
-            return route.fulfill({ contentType: 'text/html; charset=utf-8', body: body.replace('</body>',
-              `<script>Date.now = () => ${helperNow}; window.opener = null;</script><script>` + source.replaceAll('</script', '<\\/script') + '</script></body>') });
+            return route.abort();
           }
           fetched.push('nnn.htm');
           return route.fulfill(htmlAccess ? { contentType: 'text/html', body: htmlLesson } :
@@ -197,8 +192,7 @@ fs.mkdirSync(artifacts, { recursive: true });
     assert.equal(helperNavigations, 3); assert.equal(fetched.length, beforeRecovery + 1);
     await helper.screenshot({ path: path.join(artifacts, 'preview-helper.png') });
     assert.equal(await page.evaluate(root => window.testReadFile(root + '/new.pdf'), root), '%PDF-1.7\nfirst');
-    // Catalog access is already available, but the HTML resource remains blocked.
-    // The helper must visit that exact resource and wait through its challenge.
+    // HTML failures recover through the parent catalog, never a file navigation.
     await page.locator('#importFile').setInputFiles({ name: 'html-recovery.json', mimeType: 'application/json',
       buffer: Buffer.from(JSON.stringify({ root, files: [{ path: root + '/nnn.htm', url: urlFor('nnn.htm') }] })) });
     await page.getByText('JSON загружен:', { exact: false }).waitFor();
@@ -206,14 +200,16 @@ fs.mkdirSync(artifacts, { recursive: true });
     await page.locator('#selectAll').click(); await page.locator('#clearFilters').click();
     await page.locator('#download').click(); await page.locator('#status').filter({ hasText: 'Cloudflare: сайт запросил' }).waitFor();
     const beforeHTML = fetched.length;
+    helperBlocked = true;
     await page.evaluate(() => window.advanceRecoveryTest(30000));
-    await helper.getByText('Challenge pending', { exact: true }).waitFor();
-    assert.equal(helper.url(), urlFor('nnn.htm'));
+    await helper.getByText('Cloudflare: Just a moment', { exact: true }).waitFor();
+    assert.equal(new URL(helper.url()).pathname, '/');
+    assert.equal(new URL(helper.url()).searchParams.get('dir'), root);
     assert.equal(fetched.length, beforeHTML);
-    helperBlocked = false;
+    helperBlocked = false; htmlAccess = true;
     await page.evaluate(() => window.advanceRecoveryTest(60000));
     await page.getByText('Готово: 1/1. Ошибок: 0.', { exact: true }).waitFor();
-    assert.equal(htmlNavigations, 2); assert.equal(fetched.length, beforeHTML + 1);
+    assert.equal(htmlNavigations, 0); assert.equal(fetched.length, beforeHTML + 1);
     assert.equal(await page.evaluate(root => window.testReadFile(root + '/nnn.htm'), root), htmlLesson);
     assert.equal(await helper.locator('#noty-folder-helper').count(), 0);
     await helper.screenshot({ path: path.join(artifacts, 'preview-html-recovery.png') });
@@ -231,7 +227,7 @@ fs.mkdirSync(artifacts, { recursive: true });
     assert.equal(await page.evaluate(root => window.testReadFile(root + '/index(1).php'), root), htmlLesson);
     assert.equal(await page.evaluate(root => window.testReadFile(root + '/bad-content.pdf'), root), null);
     assert.equal(await page.evaluate(root => window.testReadFile(root + '/last-good.pdf'), root), '%PDF-1.7\nfirst');
-    assert.equal(helperNavigations, 3); assert.equal(htmlNavigations, 2);
+    assert.equal(helperNavigations, 5); assert.equal(htmlNavigations, 0);
     const blockedFiles = ['rimm_1.ini', 'z-after-ini.pdf'];
     await page.locator('#importFile').setInputFiles({ name: 'blocked-name.json', mimeType: 'application/json',
       buffer: Buffer.from(JSON.stringify({ root, files: blockedFiles.map(name => ({ path: root + '/' + name, url: urlFor(name) })) })) });
@@ -248,7 +244,7 @@ fs.mkdirSync(artifacts, { recursive: true });
     const beforeDenied = fetched.length;
     await page.locator('#download').click(); await page.getByText('Готово: 1/4. Ошибок: 3.', { exact: true }).waitFor();
     assert.deepEqual(fetched.slice(beforeDenied).sort(), [...deniedFiles].sort());
-    assert.equal(helperNavigations, 3); assert.equal(htmlNavigations, 2);
+    assert.equal(helperNavigations, 5); assert.equal(htmlNavigations, 0);
     assert.equal(await page.evaluate(root => window.testReadFile(root + '/denied-score.pdf'), root), null);
     assert.equal(await page.evaluate(root => window.testReadFile(root + '/empty-score.pdf'), root), null);
     assert.equal(await page.evaluate(root => window.testReadFile(root + '/z-after-denied.pdf'), root), '%PDF-1.7\nfirst');
