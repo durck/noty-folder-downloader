@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### 3.2.5
+
+- Retain authenticated helper pairing after a liveness timeout so suspended or
+  navigating tabs can reconnect without background popup attempts.
+- Replay a missed refresh when the helper reports an older revision; only the
+  current revision can resume work. Preserve stop explanations on late readiness.
+- Let an explicit helper reconnect restart an exhausted recovery budget while
+  respecting manual pauses, local failures and server cooldowns.
+- Exercise delayed replies, lost refresh commands and recovery in browser tests.
+
 ### 3.2.4
 
 - Always open and refresh the recovery helper at the main tab catalog, even

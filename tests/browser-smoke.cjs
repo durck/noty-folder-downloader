@@ -179,10 +179,34 @@ fs.mkdirSync(artifacts, { recursive: true });
       window.clearInterval = key => { if (!ticks.delete(key)) clearNativeInterval(key); };
       window.advanceRecoveryTest = ms => { window.recoveryTestNow += ms; for (const tick of [...ticks.values()]) tick(); };
     });
+    // Simulate a suspended isolated helper, then a refresh lost during navigation.
+    const pagesBeforeTimeout = context.pages().length;
+    await helper.evaluate(() => {
+      window.restoreHelperSend = BroadcastChannel.prototype.postMessage;
+      BroadcastChannel.prototype.postMessage = function () {};
+    });
+    await page.evaluate(() => { window.advanceRecoveryTest(6000); window.dispatchEvent(new Event('focus')); });
+    await page.evaluate(() => { window.advanceRecoveryTest(10001); window.dispatchEvent(new Event('focus')); });
+    await page.locator('#enableRecovery').filter({ hasText: 'не отвечает' }).waitFor();
+    await helper.evaluate(() => { BroadcastChannel.prototype.postMessage = window.restoreHelperSend; });
+    await page.evaluate(() => {
+      const send = BroadcastChannel.prototype.postMessage;
+      let drop = true;
+      BroadcastChannel.prototype.postMessage = function (message) {
+        if (drop && message.type === 'noty-helper-refresh') { drop = false; return; }
+        return send.call(this, message);
+      };
+    });
+    const delayedHelperContext = await helper.evaluate(() => JSON.parse(sessionStorage.getItem('noty-helper-context-v1')));
     challengeNext = true; helperBlocked = true;
     await page.locator('#download').click(); await page.locator('#status').filter({ hasText: 'Cloudflare: сайт запросил' }).waitFor();
     const beforeRecovery = fetched.length;
     await page.evaluate(() => window.advanceRecoveryTest(30000));
+    await page.evaluate(ctx => {
+      const channel = new BroadcastChannel(ctx.channel);
+      channel.postMessage({ type: 'noty-directory-ready', token: ctx.token, protocol: 2, revision: ctx.revision });
+      channel.close();
+    }, delayedHelperContext);
     await helper.getByText('Cloudflare: Just a moment', { exact: true }).waitFor();
     assert.equal(helperNavigations, 2); assert.equal(fetched.length, beforeRecovery);
     assert.equal(await helper.locator('#noty-folder-helper').count(), 0);
@@ -190,6 +214,8 @@ fs.mkdirSync(artifacts, { recursive: true });
     await page.evaluate(() => window.advanceRecoveryTest(60000));
     await page.getByText('Готово: 1/1. Ошибок: 0.', { exact: true }).waitFor();
     assert.equal(helperNavigations, 3); assert.equal(fetched.length, beforeRecovery + 1);
+    assert.equal(context.pages().length, pagesBeforeTimeout, 'Late recovery reuses the existing tab');
+    assert.doesNotMatch(await page.locator('#log').textContent(), /popup blocked/);
     await helper.screenshot({ path: path.join(artifacts, 'preview-helper.png') });
     assert.equal(await page.evaluate(root => window.testReadFile(root + '/new.pdf'), root), '%PDF-1.7\nfirst');
     // HTML failures recover through the parent catalog, never a file navigation.
@@ -314,15 +340,23 @@ fs.mkdirSync(artifacts, { recursive: true });
     await page.evaluate(() => window.advanceRecoveryTest(5001));
     await page.evaluate(() => window.advanceRecoveryTest(10000));
     await page.locator('#recoveryInfo').filter({ hasText: 'Служебная вкладка закрыта' }).waitFor({ timeout: 5000 });
-    assert.equal(await page.locator('#enableRecovery').textContent(), 'Открыть служебную вкладку');
+    assert.match(await page.locator('#enableRecovery').textContent(), /не отвечает.*открыть снова/);
     assert.equal(await page.locator('#status').textContent(), idleStatus);
     assert.equal(fetched.length, idleRequests);
     const reopen = context.waitForEvent('page'); await page.locator('#enableRecovery').click();
     const newHelper = await reopen; newHelper.on('pageerror', e => errors.push(e.message));
     await page.locator('#enableRecovery').filter({ hasText: 'Служебная вкладка подключена' }).waitFor();
-    await newHelper.close(); await page.evaluate(() => window.advanceRecoveryTest(5001));
-    await page.evaluate(() => window.advanceRecoveryTest(10000));
-    assert.equal(await page.locator('#enableRecovery').textContent(), 'Открыть служебную вкладку');
+    await newHelper.close();
+    // A final message already queued before close can refresh last-seen once.
+    // Advance bounded liveness cycles instead of assuming delivery ordering.
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await page.evaluate(() => { window.advanceRecoveryTest(10001); window.dispatchEvent(new Event('focus')); });
+      try {
+        await page.locator('#enableRecovery').filter({ hasText: 'не отвечает' }).waitFor({ timeout: 250 });
+        break;
+      } catch (error) { if (attempt === 4) throw error; }
+    }
+    assert.match(await page.locator('#enableRecovery').textContent(), /не отвечает.*открыть снова/);
     assert.deepEqual(errors, []);
     // Populate both chart series through real completed downloads with a
     // deterministic clock, then inspect desktop and narrow layouts.

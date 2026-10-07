@@ -27,6 +27,10 @@ use the File System Access API.
    leave that tab open too. The helper always opens the main tab's catalog,
    including when a download of an HTML file fails or an imported list covers
    another folder. An interactive site check may still need your input.
+   If the helper stops responding, its pairing is retained for reconnection.
+   After eight unsuccessful recovery attempts, inspect the network/site status
+   and click the helper button to start another recovery cycle. A manual pause
+   still requires the download or scan button to resume.
 
 The selected archive folder is created inside your destination. On Windows,
 use a short parent path such as `C:\Archive` for deeply nested collections.

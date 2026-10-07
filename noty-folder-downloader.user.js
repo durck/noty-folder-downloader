@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Noty: скачать папку целиком
 // @namespace    local.noty-folder-downloader
-// @version      3.2.4
+// @version      3.2.5
 // @license      MIT
 // @homepageURL  https://github.com/durck/noty-folder-downloader
 // @supportURL   https://github.com/durck/noty-folder-downloader/issues
@@ -770,7 +770,11 @@
       helperChannel.onmessage = event => {
         const data = event.data;
         if (event.origin !== ORIGIN || data?.token !== helperContext.token) return;
-        if (data.type === 'noty-helper-ping') { announce('noty-helper-alive', { nonce: data.nonce }); return; }
+        if (data.type === 'noty-helper-ping') {
+          announce('noty-helper-alive', { nonce: data.nonce });
+          if (notified) announce('noty-directory-ready');
+          return;
+        }
         if (data.type !== 'noty-helper-refresh' || !Number.isSafeInteger(data.revision) || data.revision <= helperContext.revision) return;
         try {
           const target = new URL(data.target);
@@ -1019,8 +1023,8 @@
     inFlightFolders: new Set(), knownFolders: new Set([root]), legacy: false, cacheAvailable: false,
     listGeneratedAt: new Date().toISOString(), completedPaths: new Set(), loadedBytes: new Map(), etaRate: 0,
     retrying: new Map(), retryEpoch: 0, autoPending: false, autoAttempts: 0, userPaused: false, recoveryBlocked: false, recoveryEpoch: 0, recovering: false,
-    helper: null, helperToken: '', helperReady: false, helperWaitingUntil: 0,
-    helperProtocol: false, helperRevision: 0, helperLastSeen: 0, helperConnectUntil: 0, helperPingDeadline: 0, helperPingNonce: '',
+    helper: null, helperToken: '', helperReady: false, helperNeedsRefresh: false, helperWaitingUntil: 0,
+    helperProtocol: false, helperRevision: 0, helperLastSeen: 0, helperConnectUntil: 0, helperPingDeadline: 0, helperPingNonce: '', helperUnresponsive: false, helperResendAt: 0,
     view: normalizeView({}, root), selected: [], runFiles: null, sessionReady: false,
     previous: null, changes: [], changeByPath: new Map(), review: null, reviewRenderedAt: 0, reviewSelected: new Set(), replacements: new Map(),
     expanded: new Set([root]), treeLimit: 150, reportLimit: 100, changeLimit: 100,
@@ -1461,6 +1465,20 @@
         return true;
       }
       if (state.helperProtocol && Date.now() < state.helperPingDeadline) return true;
+      if (state.helperProtocol) {
+        // A background tab or challenge navigation can silence the channel.
+        // Retain its identity so a late response can reconnect without a popup.
+        if (!state.helperUnresponsive) {
+          state.helperUnresponsive = true; state.helperReady = false;
+          $('enableRecovery').textContent = 'Служебная вкладка не отвечает · открыть снова';
+          if (state.autoPending || !state.pause) $('recoveryInfo').textContent = 'Служебная вкладка закрыта или не отвечает. Жду восстановления связи; данные подключения сохранены.';
+          log('Нет ответа служебной вкладки в течение 10 с. Сохраняю подключение для автоматического восстановления.');
+        }
+        // Keep the outstanding nonce valid for a delayed background-tab reply.
+        state.helperPingDeadline = Date.now() + 10000;
+        recoveryChannel.postMessage({ type: 'noty-helper-ping', token: state.helperToken, nonce: state.helperPingNonce });
+        return false;
+      }
     }
     state.helper = null; state.helperReady = false; state.helperToken = '';
     const viaChannel = state.helperProtocol;
@@ -1476,13 +1494,13 @@
   // closure promptly after background-tab timer throttling.
   window.addEventListener('focus', checkHelperConnection);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) checkHelperConnection(); });
-  function openHelper(refresh = false) {
+  function openHelper(refresh = false, userRequested = false) {
     try {
       const connected = checkHelperConnection();
       if (connected && !refresh) { try { state.helper.focus(); } catch { /* Isolated helper. */ } return true; }
       const target = parentCatalogURL;
-      if (connected && state.helperProtocol && recoveryChannel) {
-        state.helperReady = false; state.helperRevision++; state.helperConnectUntil = Date.now() + 30000;
+      if (state.helperProtocol && recoveryChannel && !(userRequested && state.helperUnresponsive)) {
+        state.helperReady = false; state.helperNeedsRefresh = false; state.helperRevision++; state.helperConnectUntil = Date.now() + 30000;
         state.helperPingDeadline = 0;
         recoveryChannel.postMessage({ type: 'noty-helper-refresh', token: state.helperToken, revision: state.helperRevision, target });
         $('enableRecovery').textContent = 'Служебная вкладка загружается…';
@@ -1491,7 +1509,7 @@
         return true;
       }
       state.helperReady = false;
-      state.helperProtocol = false; state.helperRevision = 0; state.helperPingDeadline = 0;
+      state.helperProtocol = false; state.helperRevision = 0; state.helperPingDeadline = 0; state.helperUnresponsive = false; state.helperResendAt = 0;
       state.helperConnectUntil = recoveryChannel ? Date.now() + 30000 : 0;
       state.helperToken = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
       const url = new URL(target);
@@ -1504,6 +1522,7 @@
       const context = JSON.stringify({ token: state.helperToken, channel: recoveryChannelName, revision: 0, savedAt: Date.now(), target });
       try { state.helper.name = 'noty-helper:' + context; } catch { /* URL and storage remain fallbacks. */ }
       try { state.helper.sessionStorage.setItem(helperStorageKey, context); } catch { /* Window name and URL remain fallbacks. */ }
+      state.helperNeedsRefresh = false;
       state.helper.location.replace(url.href);
       if (helperMonitor === null) helperMonitor = setInterval(checkHelperConnection, 1000);
       $('enableRecovery').textContent = 'Служебная вкладка загружается…';
@@ -1521,23 +1540,41 @@
   $('enableRecovery').onclick = () => {
     settings.autoRecover = true; fillSettings();
     try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch { /* Optional persistence. */ }
-    openHelper(true);
+    if (state.pause && !state.autoPending && !state.busy && !state.preparing && !state.userPaused && !state.recoveryBlocked && state.autoAttempts >= 8) {
+      state.autoAttempts = 1; state.autoPending = true; state.helperWaitingUntil = 0;
+      beginCooldown({ retryMs: 0 });
+      log('По запросу пользователя начат новый цикл восстановления доступа.');
+    }
+    openHelper(true, true);
+    controls();
   };
   $('challengeLink').onclick = event => { event.preventDefault(); $('enableRecovery').onclick(); };
   function helperReady(data, viaChannel = false) {
-    if (data?.type !== 'noty-directory-ready' || !state.helperToken || data.token !== state.helperToken ||
+    if (state.helperNeedsRefresh || data?.type !== 'noty-directory-ready' || !state.helperToken || data.token !== state.helperToken ||
       (data.revision || 0) !== state.helperRevision || (!viaChannel && !checkHelperConnection())) return;
     state.helperReady = true;
     $('enableRecovery').textContent = 'Служебная вкладка подключена';
-    $('recoveryInfo').textContent = 'Служебная вкладка сообщила: страница загрузилась. Доступ к файлу проверит повторный запрос.';
+    if (state.autoPending) $('recoveryInfo').textContent = 'Служебная вкладка сообщила: страница загрузилась. Доступ к файлу проверит повторный запрос.';
+    else if (!state.pause) $('recoveryInfo').textContent = 'Служебная вкладка подключена. Каталог загрузился.';
     if (state.autoPending) serviceRecovery();
   }
   if (recoveryChannel) recoveryChannel.onmessage = event => {
     const data = event.data;
     if (event.origin !== ORIGIN || !state.helperToken || data?.token !== state.helperToken || data.protocol !== 2 ||
-      data.revision !== state.helperRevision || !['noty-helper-alive', 'noty-directory-ready'].includes(data.type)) return;
+      !Number.isSafeInteger(data.revision) || data.revision < 0 || data.revision > state.helperRevision ||
+      !['noty-helper-alive', 'noty-directory-ready'].includes(data.type)) return;
     if (data.nonce && data.nonce !== state.helperPingNonce) return;
-    state.helperProtocol = true; state.helperLastSeen = Date.now(); state.helperPingDeadline = 0;
+    state.helperProtocol = true; state.helperLastSeen = Date.now(); state.helperPingDeadline = 0; state.helperUnresponsive = false;
+    if (data.revision < state.helperRevision) {
+      // The refresh may have been sent while the helper had no live document.
+      // Replay the latest command; stale readiness never resumes the queue.
+      if (Date.now() >= state.helperResendAt) {
+        state.helperResendAt = Date.now() + 5000;
+        recoveryChannel.postMessage({ type: 'noty-helper-refresh', token: state.helperToken, revision: state.helperRevision, target: parentCatalogURL });
+        log('Служебная вкладка ответила с прежним номером обновления. Повторно отправлена текущая команда.');
+      }
+      return;
+    }
     if (!data.navigating) state.helperConnectUntil = 0;
     helperReady(data, true);
   };
@@ -1556,7 +1593,7 @@
     }
     if (settings.autoRecover && !state.userPaused && !state.recoveryBlocked && state.autoAttempts < 8) {
       if (!state.autoPending) {
-        state.autoAttempts++; state.helperReady = false; state.helperWaitingUntil = 0;
+        state.autoAttempts++; state.helperReady = false; state.helperNeedsRefresh = true; state.helperWaitingUntil = 0;
       }
       state.autoPending = true;
       beginCooldown({ ...error, retryMs: recoveryDelay(state.autoAttempts, error.retryMs) });

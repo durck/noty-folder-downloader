@@ -158,10 +158,68 @@ test('channel liveness distinguishes a severed proxy from an unresponsive helper
     bus.emit({ type: 'noty-helper-alive', token, protocol: 2, revision: 0, nonce: 'wrong' });
     await clock.advance(10000);
     assert.match(h.panel.getElementById('recoveryInfo').textContent, /закрыта или не отвечает/);
+    assert.equal(bus.sent.at(-1).nonce, bus.sent.at(-2).nonce, 'Timeout retries retain the outstanding nonce');
     bus.emit({ type: 'noty-directory-ready', token, protocol: 2, revision: 0 });
-    assert.doesNotMatch(h.panel.getElementById('enableRecovery').textContent, /подключена/);
+    assert.match(h.panel.getElementById('enableRecovery').textContent, /подключена/);
     assert.equal(clock.urls.length, 1);
   } finally { h.dom.window.close(); }
+});
+
+test('delayed isolated helper reconnects after timeout without opening a popup or accepting stale readiness', async () => {
+  const clock = recoveryClock(), bus = recoveryBus(), path = root + '/first.pdf';
+  const responses = new Map([[fileURL(path), { status: 403, body: challengePage }]]);
+  const h = createHarness(responses, new MemoryDir(), directoryURL(root), { recoveryClock: clock, broadcastChannel: bus.Channel });
+  try {
+    await importJSON(h, legacyList()); await h.click('enableRecovery');
+    const token = JSON.parse(clock.helper.name.slice(12)).token;
+    clock.helper.closed = true;
+    bus.emit({ type: 'noty-directory-ready', token, protocol: 2, revision: 0 });
+    await clock.advance(6000); await clock.advance(10001);
+    clock.popupBlocked = true;
+    await h.click('download'); await clock.advance(30000);
+    const command = bus.sent.findLast(message => message.type === 'noty-helper-refresh');
+    assert.ok(command, 'Use the paired channel after liveness timeout');
+    assert.equal(command.token, token);
+    const before = bus.sent.length;
+    bus.emit({ type: 'noty-directory-ready', token, protocol: 2, revision: 0 }); await turn();
+    assert.equal(h.calls.length, 1);
+    const resent = bus.sent.slice(before).find(message => message.type === 'noty-helper-refresh');
+    assert.equal(resent?.revision, command.revision, 'Replay the missed command without advancing its revision');
+    responses.set(fileURL(path), { body: '%PDF-1.7\nrecovered' });
+    bus.emit({ type: 'noty-directory-ready', token, protocol: 2, revision: command.revision });
+    await until(() => /Готово: 1\/1/.test(h.panel.getElementById('status').textContent));
+    assert.equal(clock.urls.length, 1);
+    assert.doesNotMatch(h.panel.getElementById('log').textContent, /popup blocked/);
+  } finally { h.dom.window.close(); }
+});
+
+test('readiness from the pre-failure document cannot skip the required refresh', async () => {
+  const clock = recoveryClock(), bus = recoveryBus(), path = root + '/first.pdf';
+  const h = createHarness(new Map([[fileURL(path), { status: 403, body: challengePage }]]), new MemoryDir(), directoryURL(root),
+    { recoveryClock: clock, broadcastChannel: bus.Channel });
+  try {
+    await importJSON(h, legacyList()); await h.click('enableRecovery');
+    const token = JSON.parse(clock.helper.name.slice(12)).token;
+    bus.emit({ type: 'noty-directory-ready', token, protocol: 2, revision: 0 });
+    await h.click('download');
+    bus.emit({ type: 'noty-directory-ready', token, protocol: 2, revision: 0 });
+    await clock.advance(30000);
+    assert.equal(h.calls.length, 1, 'Wait for a fresh document before probing the file');
+    assert.ok(bus.sent.some(message => message.type === 'noty-helper-refresh'));
+  } finally { h.dom.window.close(); }
+});
+
+test('loaded helper replays readiness on ping when its first notification was lost', () => {
+  const bus = recoveryBus(), dom = new JSDOM(listing([]), { url: directoryURL(root), runScripts: 'outside-only' });
+  dom.window.BroadcastChannel = bus.Channel;
+  dom.window.sessionStorage.setItem('noty-helper-context-v1', JSON.stringify({ token: 'paired', channel: 'noty-recovery-test', savedAt: Date.now() }));
+  Object.defineProperty(dom.window.document, 'readyState', { value: 'complete' });
+  try {
+    dom.window.eval(source); bus.sent.length = 0;
+    bus.emit({ type: 'noty-helper-ping', token: 'paired', nonce: 'late' });
+    assert.deepEqual(bus.sent.map(message => message.type), ['noty-helper-alive', 'noty-directory-ready']);
+    assert.equal(bus.sent[0].nonce, 'late');
+  } finally { dom.window.close(); }
 });
 
 test('helper channel rejects foreign, stale and non-archive navigation commands', () => {
@@ -277,6 +335,7 @@ test('recovery: repeated readiness cannot create an unbounded blocked-HTML retry
     await until(() => /исчерпан/.test(h.panel.getElementById('recoveryInfo').textContent));
     await clock.advance(600000); clock.ready(h); await turn();
     assert.equal(h.calls.length, 9); assert.equal(clock.urls.length, 8);
+    assert.match(h.panel.getElementById('recoveryInfo').textContent, /исчерпан/);
     assert.equal(h.destination.dirs.get(root).files.has('nnn.htm'), false);
   } finally { h.dom.window.close(); }
 });
@@ -542,7 +601,27 @@ test('directory 403 recovery honors Retry-After and stops after eight unsuccessf
     assert.match(h.panel.getElementById('recoveryInfo').textContent, /исчерпан/);
     await clock.advance(600000); clock.ready(h); await turn();
     assert.equal(h.calls.length, 9); assert.equal(clock.urls.length, 8);
+    assert.match(h.panel.getElementById('recoveryInfo').textContent, /исчерпан/);
     assert.equal(h.destination.dirs.size, 0);
+  } finally { h.dom.window.close(); }
+});
+
+test('explicit helper reconnect restarts an exhausted recovery', async () => {
+  const clock = recoveryClock(), path = root + '/first.pdf';
+  const responses = new Map([[fileURL(path), { status: 403, body: challengePage }]]);
+  const h = createHarness(responses, new MemoryDir(), directoryURL(root), { recoveryClock: clock });
+  try {
+    await importJSON(h, legacyList()); await h.click('download');
+    for (let i = 0; i < 8; i++) {
+      await clock.advance(300000); clock.ready(h);
+      await until(() => h.calls.length === i + 2 && !h.panel.getElementById('export').disabled);
+    }
+    await clock.advance(600000); clock.ready(h);
+    assert.match(h.panel.getElementById('recoveryInfo').textContent, /исчерпан/);
+    responses.set(fileURL(path), { body: '%PDF-1.7\nrecovered' });
+    await h.click('enableRecovery'); clock.ready(h);
+    await until(() => /Готово: 1\/1/.test(h.panel.getElementById('status').textContent));
+    assert.equal(h.calls.length, 10);
   } finally { h.dom.window.close(); }
 });
 
