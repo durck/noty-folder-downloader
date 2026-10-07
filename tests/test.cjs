@@ -24,6 +24,118 @@ function recoveryClock() {
   return clock;
 }
 
+function notificationFixture(permission = 'granted') {
+  const notices = [];
+  class FakeNotification {
+    static permission = permission;
+    static requests = 0;
+    static async requestPermission() { this.requests++; this.permission = 'granted'; return this.permission; }
+    constructor(title, options) { this.title = title; this.options = options; notices.push(this); }
+    close() { this.closed = true; }
+  }
+  return { Notification: FakeNotification, notices };
+}
+function notificationVisibility(h, hidden, focused) {
+  Object.defineProperty(h.dom.window.document, 'hidden', { configurable: true, value: hidden });
+  h.dom.window.document.hasFocus = () => focused;
+  h.dom.window.document.dispatchEvent(new h.dom.window.Event('visibilitychange'));
+}
+
+test('stop notifications are opt-in, permission is requested by a button and settings survive unrelated edits', async () => {
+  const n = notificationFixture('default');
+  const h = createHarness(new Map(), new MemoryDir(), directoryURL(root), { notifications: n.Notification });
+  try {
+    assert.equal(n.Notification.requests, 0); assert.equal(n.notices.length, 0);
+    await h.click('enableNotifications');
+    assert.equal(n.Notification.requests, 1);
+    setSettings(h, { threads: 4 });
+    assert.equal(JSON.parse(h.dom.window.localStorage.getItem('noty-folder-settings-v1')).notifyStops, true);
+    await h.click('testNotification'); assert.equal(n.notices.length, 1);
+    let focused = false; h.dom.window.focus = () => { focused = true; };
+    n.notices[0].onclick(); assert.equal(focused, true); assert.equal(n.notices[0].closed, true);
+    await h.click('enableNotifications'); await h.click('testNotification');
+    assert.equal(n.notices.length, 1);
+  } finally { h.dom.window.close(); }
+});
+
+for (const background of ['hidden', 'unfocused']) test(`stop notification is deferred until ${background}, manual pause cancels it`, async () => {
+  const n = notificationFixture(), clock = recoveryClock(), path = root + '/first.pdf';
+  const h = createHarness(new Map([[fileURL(path), { status: 403, body: challengePage }]]), new MemoryDir(), directoryURL(root),
+    { notifications: n.Notification, recoveryClock: clock, settings: { notifyStops: true } });
+  try {
+    notificationVisibility(h, false, true);
+    await importJSON(h, legacyList()); await h.click('download');
+    assert.equal(n.notices.length, 0);
+    notificationVisibility(h, background === 'hidden', false);
+    assert.equal(n.notices.length, 1); assert.match(n.notices[0].options.body, /Автовосстановление/);
+    notificationVisibility(h, true, false); assert.equal(n.notices.length, 1);
+    await h.click('pause'); assert.equal(n.notices[0].closed, true);
+    notificationVisibility(h, true, false); await clock.advance(600000);
+    assert.equal(n.notices.length, 1);
+  } finally { h.dom.window.close(); }
+});
+
+test('repeated recovery emits one waiting notification and one escalation when attempts are exhausted', async () => {
+  const n = notificationFixture(), clock = recoveryClock(), path = root + '/first.pdf';
+  const h = createHarness(new Map([[fileURL(path), { status: 403, body: challengePage }]]), new MemoryDir(), directoryURL(root),
+    { notifications: n.Notification, recoveryClock: clock, settings: { notifyStops: true } });
+  try {
+    notificationVisibility(h, true, false);
+    await importJSON(h, legacyList()); await h.click('download');
+    for (let i = 0; i < 8; i++) {
+      await clock.advance(300000); clock.ready(h);
+      await until(() => h.calls.length === i + 2 && !h.panel.getElementById('export').disabled);
+    }
+    assert.equal(n.notices.length, 2); assert.match(n.notices[1].options.body, /исчерпан/);
+    assert.equal(n.notices[1].options.requireInteraction, true);
+    assert.equal(n.notices[0].options.tag, n.notices[1].options.tag);
+    await clock.advance(600000); clock.ready(h); assert.equal(n.notices.length, 2);
+  } finally { h.dom.window.close(); }
+});
+
+test('lost directory permission escalates recovery to an attention notification', async () => {
+  const n = notificationFixture(), clock = recoveryClock();
+  const h = createHarness(new Map([[fileURL(root + '/first.pdf'), { status: 403, body: challengePage }]]), new MemoryDir(), directoryURL(root),
+    { notifications: n.Notification, recoveryClock: clock, settings: { notifyStops: true } });
+  try {
+    notificationVisibility(h, true, false); await importJSON(h, legacyList()); await h.click('download');
+    h.destination.dirs.get(root).queryPermission = async () => 'prompt';
+    await clock.advance(30000); clock.ready(h);
+    await until(() => n.notices.length === 2);
+    assert.match(n.notices[1].options.body, /доступ к папке/);
+    assert.equal(n.notices[1].options.requireInteraction, true);
+    await until(() => !h.panel.getElementById('export').disabled);
+  } finally { h.dom.window.close(); }
+});
+
+test('scan stop alerts work, successful recovery clears the alert', async () => {
+  const n = notificationFixture(), clock = recoveryClock(), responses = new Map([[directoryURL(root), { status: 403, body: challengePage }]]);
+  const h = createHarness(responses, new MemoryDir(), directoryURL(root),
+    { notifications: n.Notification, recoveryClock: clock, settings: { notifyStops: true } });
+  try {
+    notificationVisibility(h, true, false); await h.click('scan');
+    assert.equal(n.notices.length, 1); assert.match(n.notices[0].options.body, /Сбор папок/);
+    await clock.advance(30000); responses.set(directoryURL(root), { body: listing([]) }); clock.ready(h);
+    await until(() => /Найдено 0 файлов/.test(h.panel.getElementById('status').textContent) && !h.panel.getElementById('export').disabled);
+    assert.equal(n.notices[0].closed, true);
+    notificationVisibility(h, true, false); assert.equal(n.notices.length, 1);
+  } finally { h.dom.window.close(); }
+});
+
+for (const mode of ['denied', 'throws']) test(`notification ${mode} never breaks queue recovery`, async () => {
+  const n = notificationFixture(mode === 'denied' ? 'denied' : 'granted'), clock = recoveryClock();
+  const NotificationAPI = mode === 'throws' ? class extends n.Notification { constructor() { throw new Error('OS unavailable'); } } : n.Notification;
+  const h = createHarness(new Map([[fileURL(root + '/first.pdf'), { status: 403, body: challengePage }]]), new MemoryDir(), directoryURL(root),
+    { notifications: NotificationAPI, recoveryClock: clock, settings: { notifyStops: true } });
+  try {
+    notificationVisibility(h, true, false); await importJSON(h, legacyList()); await h.click('download');
+    assert.match(h.panel.getElementById('status').textContent, /Автообновление включено/);
+    await clock.advance(30000); assert.equal(clock.urls.length, 1);
+    assert.equal(n.notices.length, 0); assert.equal(n.Notification.requests, 0);
+    assert.match(h.panel.getElementById('notificationInfo').textContent, mode === 'denied' ? /запрещены/ : /Не удалось/);
+  } finally { h.dom.window.close(); }
+});
+
 function recoveryBus() {
   const bus = { sent: [], channels: [] };
   bus.Channel = class {
@@ -988,6 +1100,7 @@ function listing(links) {
 function createHarness(responses, destination = new MemoryDir(), pageURL = directoryURL(root), options = {}) {
   const dom = new JSDOM('<html><body></body></html>', { url: pageURL, runScripts: 'outside-only', pretendToBeVisual: true });
   const w = dom.window;
+  if (options.notifications) w.Notification = options.notifications;
   if (options.broadcastChannel) w.BroadcastChannel = options.broadcastChannel;
   if (options.clock) w.performance.now = () => options.clock.now;
   if (options.recoveryClock) {

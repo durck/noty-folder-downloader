@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Noty: скачать папку целиком
 // @namespace    local.noty-folder-downloader
-// @version      3.2.5
+// @version      3.2.6
 // @license      MIT
 // @homepageURL  https://github.com/durck/noty-folder-downloader
 // @supportURL   https://github.com/durck/noty-folder-downloader/issues
@@ -24,7 +24,7 @@
       const n = input[key] === '' ? NaN : Number(input[key]);
       return Number.isFinite(n) ? Math.max(min, Math.min(max, Math.round(n))) : fallback;
     };
-    return { auto: input.auto !== false, autoRecover: input.autoRecover !== false, threads: number('threads', 3, 1, 12),
+    return { notifyStops: input.notifyStops === true, auto: input.auto !== false, autoRecover: input.autoRecover !== false, threads: number('threads', 3, 1, 12),
       maxThreads: number('maxThreads', 6, 1, 12), delayMs: number('delayMs', 150, 0, 5000),
       windowSeconds: number('windowSeconds', 10, 5, 60), gainPercent: number('gainPercent', 8, 3, 30),
       scanThreads: number('scanThreads', 3, 1, 6), scanDelayMs: number('scanDelayMs', 200, 0, 5000),
@@ -922,6 +922,11 @@
     <small id="recoveryInfo" role="status"></small>
     <a id="challengeLink" target="_blank" rel="noopener noreferrer" hidden>Открыть сайт для проверки</a>
     <button id="enableRecovery">Включить автообновление вкладки</button>
+    <details id="notificationDetails"><summary>Уведомления</summary>
+      <button id="enableNotifications">Включить уведомления</button><button id="testNotification" disabled>Проверить уведомление</button>
+      <small id="notificationInfo" role="status"></small>
+      <small>Сообщать об остановке сбора или скачивания, когда вкладка в фоне или браузер не в фокусе. Ручная пауза — без уведомления. Вкладка должна оставаться открытой.</small>
+    </details>
     <details id="selectionDetails"><summary>Выбор папок и фильтры</summary><fieldset id="selectionFields">
       <label for="folderSearch">Поиск папки</label><input id="folderSearch" type="search">
       <button id="selectAll">Все папки</button><button id="selectNone">Снять выбор</button>
@@ -1115,7 +1120,7 @@
   }
   for (const key of ['auto', 'autoRecover', ...settingKeys]) {
     $(key).onchange = () => {
-      const input = { auto: $('auto').value === 'auto', autoRecover: $('autoRecover').checked };
+      const input = { ...settings, auto: $('auto').value === 'auto', autoRecover: $('autoRecover').checked };
       for (const name of settingKeys) input[name] = $(name).value;
       settings = normalizeSettings(input); tuner.updateSettings(settings, performance.now());
       if (!settings.autoRecover) cancelRecovery();
@@ -1125,6 +1130,77 @@
   }
   function say(message) { $('status').textContent = message; }
   function log(message) { state.logs.push(message); state.logs = state.logs.slice(-50); $('log').textContent = state.logs.join('\n'); }
+  let stopAlert = null, desktopAlert = null, permissionPending = false;
+  const alertedStages = new Set(), notificationTag = 'noty-stop-' + Math.random().toString(36).slice(2);
+  function closeDesktopAlert() {
+    try { desktopAlert?.close(); } catch { /* Notification cleanup must not affect work. */ }
+    desktopAlert = null;
+  }
+  function resetStopAlerts() { stopAlert = null; alertedStages.clear(); closeDesktopAlert(); }
+  function renderNotificationSettings() {
+    const supported = typeof Notification === 'function';
+    $('enableNotifications').disabled = !supported || permissionPending;
+    $('enableNotifications').textContent = settings.notifyStops ? 'Выключить уведомления' : 'Включить уведомления';
+    $('testNotification').disabled = !supported || Notification.permission !== 'granted' || !settings.notifyStops;
+    $('notificationInfo').textContent = !supported ? 'Этот браузер не поддерживает системные уведомления.' :
+      Notification.permission === 'denied' ? 'Уведомления запрещены. Разреши их для этого сайта в настройках браузера, затем включи здесь.' :
+      settings.notifyStops && Notification.permission === 'granted' ? 'Уведомления включены. Если проверка не видна, проверь уведомления браузера и режим «Не беспокоить» в системе.' :
+      'Уведомления выключены. Нажми «Включить уведомления» и разреши их в браузере.';
+  }
+  function displayNotification(title, body, action = false) {
+    try {
+      closeDesktopAlert();
+      const notification = new Notification(title, { body, tag: notificationTag, requireInteraction: action });
+      desktopAlert = notification;
+      notification.onclick = () => {
+        window.focus(); $('status').scrollIntoView?.({ block: 'center' }); notification.close();
+      };
+      notification.onerror = () => { $('notificationInfo').textContent = 'Не удалось показать уведомление. Проверь разрешения браузера и системы.'; };
+      return true;
+    } catch (error) {
+      $('notificationInfo').textContent = 'Не удалось показать уведомление: ' + error.message;
+      return false;
+    }
+  }
+  function deliverStopAlert() {
+    if (!stopAlert || !state.pause || state.userPaused || !settings.notifyStops ||
+      typeof Notification !== 'function' || Notification.permission !== 'granted' ||
+      (!document.hidden && document.hasFocus()) || alertedStages.has(stopAlert.kind)) return;
+    const action = stopAlert.kind === 'action';
+    const title = action ? 'Нотный архив: нужно внимание' : 'Нотный архив: загрузка приостановлена';
+    const phase = state.phase === 'scan' ? 'Сбор папок' : 'Скачивание';
+    const body = `${root || 'Весь архив'} · ${phase}\n${stopAlert.reason.slice(0, 280)}\n` +
+      (action ? 'Открой основную вкладку для продолжения.' : 'Автовосстановление включено; очередь сохранена.');
+    if (displayNotification(title, body, action)) alertedStages.add(stopAlert.kind);
+  }
+  function recordStopAlert(kind, reason) {
+    if (state.userPaused || (stopAlert?.kind === 'action' && kind === 'waiting')) return;
+    stopAlert = { kind, reason }; deliverStopAlert();
+  }
+  $('enableNotifications').onclick = async () => {
+    if (permissionPending || typeof Notification !== 'function') return;
+    try {
+      if (settings.notifyStops) { settings.notifyStops = false; closeDesktopAlert(); }
+      else {
+        permissionPending = true; renderNotificationSettings();
+        const permission = Notification.permission === 'default' ? await Notification.requestPermission() : Notification.permission;
+        settings.notifyStops = permission === 'granted';
+      }
+      try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch { /* Session preference still applies. */ }
+      permissionPending = false; renderNotificationSettings(); deliverStopAlert();
+    } catch (error) {
+      permissionPending = false; renderNotificationSettings();
+      $('notificationInfo').textContent = 'Не удалось запросить разрешение: ' + error.message;
+    }
+  };
+  $('testNotification').onclick = () => {
+    if (settings.notifyStops && typeof Notification === 'function' && Notification.permission === 'granted')
+      displayNotification('Нотный архив: проверка уведомлений', 'Так будет выглядеть сообщение об остановке. Нажми, чтобы вернуться к загрузкам.');
+  };
+  window.addEventListener('blur', deliverStopAlert);
+  document.addEventListener('visibilitychange', deliverStopAlert);
+  window.addEventListener('focus', () => { renderNotificationSettings(); if (!document.hidden && document.hasFocus()) closeDesktopAlert(); });
+  renderNotificationSettings();
   function controls() {
     const locked = state.busy || state.preparing || state.autoPending;
     const paused = state.autoPending || (state.pause && state.queue.length > 0);
@@ -1440,11 +1516,13 @@
     // Only successful work after resumption proves progress. Jobs finishing
     // during the pause and local journal skips cannot reset the retry budget.
     if (!state.recovering || state.pause || state.autoPending) return;
+    resetStopAlerts();
     state.recovering = false; state.autoAttempts = 0; state.helperWaitingUntil = 0;
     $('recoveryInfo').textContent = 'После восстановления запрос выполнен успешно. Счётчик безуспешных попыток сброшен.';
     log('После восстановления запрос выполнен успешно. Следующая отдельная остановка начнётся с попытки 1/8.');
   }
   function manualRun() {
+    resetStopAlerts();
     cancelRecovery(); state.userPaused = false; state.recoveryBlocked = false; state.autoAttempts = 0;
     state.recovering = false; $('recoveryInfo').textContent = '';
   }
@@ -1589,7 +1667,7 @@
       log(`Проверка доступа: ${error.evidence || 'ответ сервера'}. Страница проверки: ${parentCatalogURL}`);
     }
     if (!error.networkFailure && !error.challenge && ![403, 429, 503].includes(error.status)) {
-      state.stopReason = error.message; state.recoveryBlocked = true; cancelRecovery(); return;
+      state.stopReason = error.message; state.recoveryBlocked = true; cancelRecovery(); recordStopAlert('action', error.message); return;
     }
     if (settings.autoRecover && !state.userPaused && !state.recoveryBlocked && state.autoAttempts < 8) {
       if (!state.autoPending) {
@@ -1602,6 +1680,8 @@
       if (error.retryMs) beginCooldown(error);
       if (state.autoAttempts >= 8) $('recoveryInfo').textContent = 'Лимит 8 автоматических попыток исчерпан. Проверь доступ к сайту, сеть и прокси, затем продолжи вручную.';
     }
+    recordStopAlert(state.autoPending ? 'waiting' : 'action', !state.autoPending && state.autoAttempts >= 8
+      ? 'Лимит автоматических попыток исчерпан. ' + error.message : error.message);
   }
   function serviceRecovery() {
     checkHelperConnection();
@@ -1611,6 +1691,7 @@
     if (state.helperWaitingUntil) {
       if (state.autoAttempts >= 8) {
         cancelRecovery(); $('recoveryInfo').textContent = 'Лимит 8 автоматических попыток исчерпан. Проверь доступ к сайту, сеть и прокси, затем продолжи вручную.';
+        recordStopAlert('action', $('recoveryInfo').textContent);
         controls(); return;
       }
       state.autoAttempts++;
@@ -1623,7 +1704,8 @@
     state.preparing = true; controls();
     try {
       if (phase === 'download' && await state.output?.queryPermission({ mode: 'readwrite' }) !== 'granted') {
-        cancelRecovery(); say('Для продолжения нужен доступ к папке. Нажми кнопку скачивания.'); return;
+        cancelRecovery(); say('Для продолжения нужен доступ к папке. Нажми кнопку скачивания.');
+        recordStopAlert('action', $('status').textContent); return;
       }
       if (epoch !== state.recoveryEpoch || !state.autoPending || state.userPaused || !settings.autoRecover) return;
       state.autoPending = false; state.recovering = true;
@@ -1632,7 +1714,7 @@
       log('Страница проверки загрузилась. Повторяю запрос; доступ к файлу ещё не подтверждён.');
       if (phase === 'scan') { state.preparing = false; await scan(true); }
       else await runQueue();
-    } catch (e) { cancelRecovery(); say('Автопродолжение остановлено: ' + e.message); }
+    } catch (e) { cancelRecovery(); state.pause = true; say('Автопродолжение остановлено: ' + e.message); recordStopAlert('action', $('status').textContent); }
     finally { state.preparing = false; controls(); }
   }
   async function retryOperation(path, operation) {
@@ -2038,7 +2120,7 @@
     } finally { state.busy = false; state.active = 0; state.rate = 0; state.etaRate = 0; state.fileRate = 0; showSpeed(); renderJobs(); renderReview(); controls(); }
   }
   $('scan').onclick = () => scan();
-  $('pause').onclick = () => { state.userPaused = true; cancelRecovery(); state.pause = true; say('На паузе. Автопродолжение отменено; уже начатые файлы или страницы завершаются.'); showVolume(); controls(); };
+  $('pause').onclick = () => { resetStopAlerts(); state.userPaused = true; cancelRecovery(); state.pause = true; say('На паузе. Автопродолжение отменено; уже начатые файлы или страницы завершаются.'); showVolume(); controls(); };
   async function startDownload() {
     if (state.busy || state.preparing || !state.scanned || !state.selected.length || Date.now() < state.cooldownUntil) return;
     manualRun();

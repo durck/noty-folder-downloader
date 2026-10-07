@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### 3.2.6
+
+- Add opt-in desktop notifications for unexpected download/scan stops while the
+  tab is hidden or its browser window is unfocused, with permission and test buttons.
+- Notify once per recovery incident, then once more if manual intervention is
+  needed. Suppress manual-pause alerts and close alerts after successful recovery.
+- Keep notification failures separate from queue recovery and persist the setting.
+- Cover background/focus behavior, denied permissions, failed delivery, retry
+  deduplication, escalation, scan recovery and browser controls.
+
 ### 3.2.5
 
 - Retain authenticated helper pairing after a liveness timeout so suspended or

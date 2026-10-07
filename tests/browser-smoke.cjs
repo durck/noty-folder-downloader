@@ -85,6 +85,14 @@ fs.mkdirSync(artifacts, { recursive: true });
       return route.abort();
     });
     await page.addInitScript(({ root }) => {
+      // Capture notification delivery without showing OS popups in acceptance tests.
+      window.testNotifications = [];
+      window.Notification = class {
+        static permission = 'default';
+        static async requestPermission() { this.permission = 'granted'; return 'granted'; }
+        constructor(title, options) { this.title = title; this.options = options; window.testNotifications.push(this); }
+        close() { this.closed = true; }
+      };
       const encode = text => new TextEncoder().encode(text);
       const files = new Map([[root + '/first.pdf', { bytes: encode('user original'), modified: 1 }]]);
       const directories = new Set(['', root]);
@@ -198,9 +206,20 @@ fs.mkdirSync(artifacts, { recursive: true });
       };
     });
     const delayedHelperContext = await helper.evaluate(() => JSON.parse(sessionStorage.getItem('noty-helper-context-v1')));
+    await page.locator('#notificationDetails > summary').click();
+    await page.locator('#enableNotifications').click();
+    await page.locator('#notificationInfo').filter({ hasText: 'Уведомления включены' }).waitFor();
+    await page.locator('#testNotification').click();
+    assert.equal(await page.evaluate(() => window.testNotifications.length), 1);
+    await page.evaluate(() => {
+      window.testNotifications.length = 0;
+      Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+    });
     challengeNext = true; helperBlocked = true;
     await page.locator('#download').click(); await page.locator('#status').filter({ hasText: 'Cloudflare: сайт запросил' }).waitFor();
     const beforeRecovery = fetched.length;
+    assert.equal(await page.evaluate(() => window.testNotifications.length), 1);
+    assert.match(await page.evaluate(() => window.testNotifications[0].options.body), /Автовосстановление/);
     await page.evaluate(() => window.advanceRecoveryTest(30000));
     await page.evaluate(ctx => {
       const channel = new BroadcastChannel(ctx.channel);
@@ -215,6 +234,11 @@ fs.mkdirSync(artifacts, { recursive: true });
     await page.getByText('Готово: 1/1. Ошибок: 0.', { exact: true }).waitFor();
     assert.equal(helperNavigations, 3); assert.equal(fetched.length, beforeRecovery + 1);
     assert.equal(context.pages().length, pagesBeforeTimeout, 'Late recovery reuses the existing tab');
+    assert.equal(await page.evaluate(() => window.testNotifications.length), 1);
+    assert.equal(await page.evaluate(() => window.testNotifications[0].closed), true);
+    await page.evaluate(() => { delete document.hidden; });
+    await page.locator('#enableNotifications').click();
+    await page.locator('#notificationDetails > summary').click();
     assert.doesNotMatch(await page.locator('#log').textContent(), /popup blocked/);
     await helper.screenshot({ path: path.join(artifacts, 'preview-helper.png') });
     assert.equal(await page.evaluate(root => window.testReadFile(root + '/new.pdf'), root), '%PDF-1.7\nfirst');

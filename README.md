@@ -32,6 +32,14 @@ use the File System Access API.
    and click the helper button to start another recovery cycle. A manual pause
    still requires the download or scan button to resume.
 
+Open **Уведомления** in the download panel and click **Включить уведомления**
+to allow desktop alerts, then use **Проверить уведомление**. Alerts appear when
+a scan/download unexpectedly pauses while the tab is hidden or its window is
+unfocused. Repeated automatic retries share one alert; exhausted recovery or a
+local access failure can produce an additional attention alert. Manual pauses
+are silent. Clicking an alert focuses the main tab. Keep the tab/browser open;
+OS notification settings and Do Not Disturb may suppress delivery.
+
 The selected archive folder is created inside your destination. On Windows,
 use a short parent path such as `C:\Archive` for deeply nested collections.
 Pause and let active files finish before updating the userscript or reloading.
