@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Noty: скачать папку целиком
 // @namespace    local.noty-folder-downloader
-// @version      3.2.6
+// @version      3.2.7
 // @license      MIT
 // @homepageURL  https://github.com/durck/noty-folder-downloader
 // @supportURL   https://github.com/durck/noty-folder-downloader/issues
@@ -508,7 +508,12 @@
     if (!isHTMLFile && (/text\/html/i.test(contentType) || /^<(?:!doctype|html|head|body)/i.test(text))) {
       throw new Error('Вместо файла сервер вернул HTML-страницу.');
     }
-    if (/\.pdf$/i.test(path) && !text.startsWith('%PDF-')) throw new Error('Ответ не является PDF.');
+    if (/\.pdf$/i.test(path) && !hasPDFMarker(bytes)) throw new Error('Ответ не является PDF.');
+  }
+  // PDF readers look for %PDF- in the first 1024 bytes: old uploads carry a binary
+  // prefix (e.g. MacBinary) before it and still open fine.
+  function hasPDFMarker(bytes) {
+    return String.fromCharCode(...bytes.subarray(0, 1024)).includes('%PDF-');
   }
 
   function listingCell(link, heading) {

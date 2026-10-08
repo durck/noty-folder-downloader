@@ -360,6 +360,21 @@ test('helper channel rejects foreign, stale and non-archive navigation commands'
   } finally { dom.window.close(); }
 });
 
+test('regression: PDF readers accept %PDF- anywhere in the first 1024 bytes, so does the downloader', () => {
+  const pdf = prefix => {
+    const body = new TextEncoder().encode('%PDF-1.3\n%\xe2\xe3\xcf\xd3\n1 0 obj');
+    const bytes = new Uint8Array(prefix + body.length);
+    bytes.set([0, 0x11, 0x80, 0xff].slice(0, prefix)); bytes.set(body, prefix);
+    return bytes;
+  };
+  core.validateHeader(pdf(0), 'Флейта.pdf', 'application/pdf');
+  core.validateHeader(pdf(128), 'Флейта.pdf', 'application/pdf');
+  core.validateHeader(pdf(1019), 'Флейта.pdf', 'application/pdf');
+  assert.throws(() => core.validateHeader(pdf(1020), 'Флейта.pdf', 'application/pdf'), /не является PDF/);
+  assert.throws(() => core.validateHeader(new TextEncoder().encode('GIF89a'), 'a.pdf', ''), /не является PDF/);
+  assert.throws(() => core.validateHeader(new TextEncoder().encode('<html>%PDF-</html>'), 'a.pdf', ''), /HTML-страницу/);
+});
+
 test('regression: ordinary HTML with Cloudflare JavaScript Detections downloads and scanning continues', async () => {
   const html = '<!doctype html><html><head><title>Music</title></head><body>Just a moment is a song.' +
     '<script src="/cdn-cgi/challenge-platform/scripts/jsd/api.js"></script></body></html>';

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### 3.2.7
+
+- Accept a PDF when `%PDF-` appears anywhere in its first 1024 bytes, as PDF
+  readers do. Old uploads with a binary prefix (e.g. MacBinary) open fine in the
+  browser but were rejected with «Ответ не является PDF».
+
 ### 3.2.6
 
 - Add opt-in desktop notifications for unexpected download/scan stops while the
