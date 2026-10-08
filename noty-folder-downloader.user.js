@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Noty: скачать папку целиком
 // @namespace    local.noty-folder-downloader
-// @version      3.2.7
+// @version      3.2.8
 // @license      MIT
 // @homepageURL  https://github.com/durck/noty-folder-downloader
 // @supportURL   https://github.com/durck/noty-folder-downloader/issues
@@ -402,15 +402,30 @@
     }
   }
   async function runPool({ queue, limit, paused, worker, complete, failed, tick = () => {},
-    delayMs = () => 0, now = () => performance.now(), wait = ms => new Promise(r => setTimeout(r, ms)) }) {
-    const active = new Set(); let nextStart = 0;
+    delayMs = () => 0, now = () => performance.now(), wait }) {
+    const active = new Set(); let nextStart = 0, wake = null, failedCallback = false, callbackError;
+    // Each job signals the current waiter once. Repeated Promise.race(active)
+    // retains a new reaction on every long-running job until that job settles.
+    const changed = ms => new Promise((resolve, reject) => {
+      let timer;
+      const finish = (error, rejected = false) => {
+        if (wake !== finish) return;
+        wake = null; clearTimeout(timer);
+        if (rejected) reject(error); else resolve();
+      };
+      wake = finish;
+      if (wait) Promise.resolve().then(() => wait(ms)).then(() => finish(), error => finish(error, true));
+      else timer = setTimeout(finish, ms);
+    });
     try {
       while (queue.length || active.size) {
+        if (failedCallback) throw callbackError;
         while (!paused() && queue.length && active.size < Math.max(1, Math.min(12, limit())) && now() >= nextStart) {
           const item = queue.shift();
           // Queue ownership is transferred synchronously before any asynchronous work.
           const job = Promise.resolve().then(() => worker(item)).then(() => complete(item), e => failed(e, item))
-            .finally(() => active.delete(job));
+            .catch(error => { if (!failedCallback) { failedCallback = true; callbackError = error; } })
+            .finally(() => { active.delete(job); wake?.(); });
           active.add(job); nextStart = now() + delayMs();
           if (delayMs() > 0) break;
         }
@@ -418,8 +433,9 @@
         if (!active.size && (paused() || !queue.length)) break;
         const canStart = !paused() && queue.length && active.size < Math.max(1, Math.min(12, limit()));
         const untilStart = canStart ? Math.max(1, nextStart - now()) : 200;
-        await Promise.race([...active, wait(Math.min(200, untilStart))]);
+        await changed(Math.min(200, untilStart));
       }
+      if (failedCallback) throw callbackError;
     } finally { await Promise.allSettled(active); }
   }
 

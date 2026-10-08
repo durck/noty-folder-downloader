@@ -532,6 +532,15 @@ Transfer speed still depends on the server and network. Files are
 streamed instead of buffering the entire archive in memory. A 90-second
 inactivity timeout detects stalled transfers.
 
+The scheduler does not accumulate completion listeners on slow transfers.
+The manifest and completion journal still require memory proportional to the
+number of files. A Chrome **Out of Memory** crash loses the live queue and folder
+permission handles; the crashed script cannot send a notification or recover
+itself. Reload after updating the script, restore **Из кеша** (or import your
+JSON), then use **Проверить папку** with the same parent destination and repair
+missing/empty files. Keep the existing completion journal with the archive.
+Do not clear site data while recovering the cached list.
+
 Unsafe Windows filename characters are escaped. Case-insensitive path
 collisions and excessively long individual names stop the scan instead of
 silently merging files. Very long full paths may still fail in the browser on

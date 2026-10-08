@@ -3,6 +3,16 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { runPool } = require('../noty-folder-downloader.user.js');
 
+for (const mode of ['files', 'idle']) test(`a long transfer does not retain scheduler promises (${mode})`, () => {
+  const { execFileSync } = require('node:child_process');
+  const samples = JSON.parse(execFileSync(process.execPath,
+    ['--disable-warning=ExperimentalWarning', require.resolve('./pool-memory.cjs'), ...(mode === 'idle' ? ['--idle'] : [])],
+    { encoding: 'utf8', timeout: 30000 }));
+  assert.equal(samples.length, 2);
+  assert.ok(samples[1].promises - samples[0].promises < 200,
+    `Scheduler retained promises grew with completed files: ${JSON.stringify(samples)}`);
+});
+
 // Use virtual request completion times with the production scheduler.
 async function scanTree({ chain = false, count = 21, latency = 1000, delay = 200, limit = 5 } = {}) {
   const queue = [0], starts = [], timers = [], visited = new Set();

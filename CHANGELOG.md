@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### 3.2.8
+
+- Bound scheduler memory while a slow transfer remains active: use one completion
+  signal per job instead of repeatedly attaching Promise.race reactions to it.
+  Cancel the scheduler timer when a completion wakes it early.
+- Preserve launch pacing, live concurrency limits, pause/drain behavior and
+  callback error propagation. Add V8 heap regressions for thousands of completed
+  files alongside a stalled transfer and for repeated idle polling.
+- This fixes a reproduced retention defect; it does not establish the cause of
+  every browser Out of Memory crash.
+
 ### 3.2.7
 
 - Accept a PDF when `%PDF-` appears anywhere in its first 1024 bytes, as PDF

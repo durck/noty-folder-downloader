@@ -1382,6 +1382,23 @@ test('pool stops scheduling on failure but drains in-flight work and retains pen
   assert.deepEqual(started, [1, 2, 3]); assert.deepEqual(completed.sort(), [2, 3]);
   assert.deepEqual(queue, [1, 4, 5]);
 });
+for (const callback of ['complete', 'failed']) test(`pool drains work and propagates a thrown ${callback} callback`, async () => {
+  const error = new Error('callback failed'), started = [], releases = new Map();
+  const queue = [1, 2, 3]; let ended = false;
+  const run = core.runPool({ queue, limit: () => 2, paused: () => false,
+    worker: id => new Promise((resolve, reject) => {
+      started.push(id); releases.set(id, () => id === 1 && callback === 'failed' ? reject(error) : resolve());
+    }),
+    complete: id => { if (id === 1) throw error; }, failed: e => { throw e; }
+  }).finally(() => { ended = true; });
+  const rejected = assert.rejects(run, e => e === error);
+  await until(() => started.length === 2);
+  releases.get(1)(); await turn();
+  assert.equal(ended, false); assert.deepEqual(started, [1, 2]);
+  releases.get(2)(); await rejected;
+  assert.deepEqual(queue, [3]);
+});
+
 test('serialized writes do not overlap and a failed write does not poison the next one', async () => {
   const write = core.serialWriter(); let active = 0, peak = 0;
   const events = [];
